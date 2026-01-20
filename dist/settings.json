@@ -1,0 +1,31 @@
+{
+    "tg_token": "7607525379:AAFMvAu6X9Q7v4c-VC2fiUkhIM6opFhXW6Q",
+    "tg_chat_id": -1002343090842,
+    "vk_token": "vk1.a.Uf2aQ3tCOjomciB1ddEoD_ICPzFShokdLCXUOzUZgderuuA8Q9oHf5q7NhqTWVeMDTHoqeLJZ75vbbNK83srXHdvDMJl8rqdz8I8BRkQdftBY3FfdhhUl0zolbE4CCCp38t6Uq04grzzXt1zGjqLlifRXptfwSg-RP5oMNcuUq14bYAeBFfFfcJoZJza2ufePZNeUi4MEo1C0cllxpSq-w",
+    "vk_chat_id": "001",
+    "sources": [
+        "https://vk.com/sale1_sadovod",
+        "https://vk.com/sadovod_01",
+        "https://vk.com/gmirov93",
+        "https://vk.com/zen_odezd_optom",
+        "https://vk.com/public209013890",
+        "https://vk.com/sadprice00",
+        "https://vk.com/sadovod_sd",
+        "https://vk.com/id377727025",
+        "https://vk.com/sadovod_tkk",
+        "https://vk.com/newandsales"
+    ],
+    "start_time": "06:00",
+    "end_time": "23:00",
+    "freq": 360,
+    "price_percent": 50.0,
+    "price_delta": 200,
+    "remove_links": true,
+    "remove_emoji": true,
+    "stopwords": "",
+    "limit_photos": true,
+    "limit_photos_count": 4,
+    "mode": "date",
+    "count": null,
+    "hours": 24
+}
