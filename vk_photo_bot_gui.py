@@ -64,6 +64,20 @@ ANTIWORDS = [
     "лак", "для стирки", "зубная паста", "отбеливатель", "дезодорант", "утенок", "туалет"
 ]
 
+# ================== ADMIN WHITELIST ==================
+# Список администраторов, которым разрешено отправлять ссылки
+# Можно указывать как числовые ID, так и короткие имена (screen_name)
+# Пример: ["1055595410", "trendova_arina", "115693485"]
+ADMIN_WHITELIST = [
+    "1055595410",      # @id1055595410
+    "trendova_arina",  # https://vk.com/trendova_arina
+    "115693485",       # https://vk.com/id115693485
+    "irina_mod"        # https://vk.com/irina_mod
+]
+
+# Кэш для хранения преобразованных ID (screen_name -> numeric_id)
+_admin_id_cache = {}
+
 _global_log_window_instance = None
 stop_event = threading.Event()
 
@@ -579,6 +593,85 @@ def log_spam_to_file(user_id, text, reason, details, log_file="spam_log.txt"):
             f.write(f"{'='*80}\n")
     except Exception as e:
         add_log(f"❌ Ошибка записи в лог спама: {e}")
+
+# ================== ADMIN WHITELIST FUNCTIONS ==================
+
+def resolve_admin_ids(vk_token):
+    """
+    Преобразует короткие имена (screen_name) из ADMIN_WHITELIST в числовые ID
+    Кэширует результаты в _admin_id_cache
+    """
+    global _admin_id_cache
+
+    # Разделяем на числовые ID и screen_name
+    numeric_ids = []
+    screen_names = []
+
+    for admin in ADMIN_WHITELIST:
+        if str(admin).isdigit():
+            numeric_ids.append(int(admin))
+        else:
+            screen_names.append(admin)
+
+    # Если есть screen_name - конвертируем их через VK API
+    if screen_names:
+        try:
+            from urllib.parse import urlencode
+            user_ids_param = ",".join(screen_names)
+            params = {
+                "user_ids": user_ids_param,
+                "v": VK_API_VERSION,
+                "access_token": vk_token
+            }
+            url = f"https://api.vk.com/method/users.get?{urlencode(params)}"
+            response = requests.get(url, timeout=10).json()
+
+            if "response" in response:
+                for user in response["response"]:
+                    user_id = user.get("id")
+                    if user_id:
+                        numeric_ids.append(user_id)
+                        # Кэшируем соответствие screen_name -> id
+                        for sn in screen_names:
+                            if sn.lower() in [user.get("screen_name", "").lower(),
+                                             user.get("domain", "").lower()]:
+                                _admin_id_cache[sn] = user_id
+                                add_log(f"🔑 Админ '{sn}' -> ID {user_id}")
+            else:
+                add_log(f"⚠️ Не удалось получить ID для screen_name: {screen_names}")
+                add_log(f"   Ответ VK API: {response}")
+        except Exception as e:
+            add_log(f"❌ Ошибка при получении ID админов: {e}")
+
+    # Добавляем все известные числовые ID в кэш
+    for num_id in numeric_ids:
+        _admin_id_cache[str(num_id)] = num_id
+
+    return numeric_ids
+
+def is_admin(user_id):
+    """
+    Проверяет, является ли пользователь администратором
+
+    Args:
+        user_id: числовой ID пользователя VK
+
+    Returns:
+        bool: True если админ, False если нет
+    """
+    if not user_id:
+        return False
+
+    # Проверяем в кэше преобразованных ID
+    user_id_str = str(user_id)
+    if user_id in _admin_id_cache.values() or user_id_str in _admin_id_cache:
+        return True
+
+    # Проверяем напрямую в ADMIN_WHITELIST (если указан числовой ID)
+    if user_id_str in ADMIN_WHITELIST or user_id in ADMIN_WHITELIST:
+        return True
+
+    return False
 
 # ================== PRICE PATTERNS ==================
 _PRICE_CURRENCY_PATTERN = (
@@ -3338,7 +3431,12 @@ def vk_antispam_worker(
     if not get_longpoll_server():
         add_log("❌ Антиспам: не удалось подключиться к Long Poll. Остановка.")
         return
-    
+
+    # Получаем ID админов из whitelist
+    add_log(f"🔑 Загрузка whitelist администраторов...")
+    admin_ids = resolve_admin_ids(vk_token)
+    add_log(f"✅ Админов в whitelist: {len(admin_ids)}")
+
     add_log(f"👂 Антиспам: слушаю чат {vk_peer_id}, окно {window_sec} сек")
     
     # Основной цикл Long Poll
@@ -3406,8 +3504,16 @@ def vk_antispam_worker(
                             # Проверяем паттерны спама
                             is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
 
+                            # КРИТИЧНО: Проверка ссылок для не-админов
+                            # Ссылки могут отправлять ТОЛЬКО администраторы!
+                            if pattern_details.get('has_links') and not is_admin(from_id):
+                                is_spam_detected = True
+                                spam_reason = f"ссылка от не-админа (user_id={from_id})"
+                                spam_details = pattern_details
+                                add_log(f"🚫 НЕ-АДМИН отправил ссылку! user_id={from_id}")
+
                             # Проверяем есть ли в списке "новых"
-                            if from_id in join_ts:
+                            elif from_id in join_ts:
                                 time_since_join = current_time - join_ts[from_id]
 
                                 # Если написал слишком быстро после входа
