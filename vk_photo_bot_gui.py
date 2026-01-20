@@ -388,6 +388,198 @@ def add_log(msg):
     else:
         print(log_message)
 
+# ================== SPAM DETECTION FUNCTIONS ==================
+
+def count_emojis(text):
+    """Подсчитывает количество эмодзи в тексте"""
+    if not text:
+        return 0
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF"
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA70-\U0001FAFF"
+        "\u200d"
+        "\ufe0f"
+        "]+", flags=re.UNICODE)
+    return len(emoji_pattern.findall(text))
+
+def has_links(text):
+    """Проверяет наличие ссылок в тексте"""
+    if not text:
+        return False
+    # Проверка URL с протоколом
+    if re.search(r'\b(?:(?:https?|ftp)://|www\.)\S+', text, re.IGNORECASE):
+        return True
+    # Проверка доменов
+    if re.search(r'\b(?:[a-z0-9-]{1,63}\.)+(?:[a-z]{2,63})', text, re.IGNORECASE):
+        return True
+    return False
+
+def has_phone(text):
+    """Проверяет наличие телефонных номеров"""
+    if not text:
+        return False
+    phone_pattern = re.compile(
+        r'(\+7|8)?[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}'
+        r'|(?<=\s)\d{11}(?=\s|$)'
+    )
+    return bool(phone_pattern.search(text))
+
+def count_mentions(text):
+    """Подсчитывает количество упоминаний (@user)"""
+    if not text:
+        return 0
+    # Ищем @user или [id123|text]
+    mentions = re.findall(r'@[a-zA-Z0-9_]+|\[id\d+\|', text)
+    return len(mentions)
+
+def is_mostly_caps(text):
+    """Проверяет, написан ли текст в основном заглавными буквами (>70%)"""
+    if not text or len(text) < 5:
+        return False
+    # Считаем только буквы
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    caps_count = sum(1 for c in letters if c.isupper())
+    return (caps_count / len(letters)) > 0.7
+
+def has_repetitive_chars(text):
+    """Проверяет наличие повторяющихся символов (!!!, ???, ..., etc)"""
+    if not text:
+        return False
+    # Ищем 3+ одинаковых символа подряд
+    return bool(re.search(r'(.)\1{2,}', text))
+
+def is_gibberish(text):
+    """Проверяет на бессмысленный набор символов"""
+    if not text or len(text) < 5:
+        return False
+    # Удаляем пробелы и проверяем
+    text_clean = text.replace(' ', '').lower()
+    # Если нет гласных в русском или английском - подозрительно
+    vowels_ru = set('аеёиоуыэюя')
+    vowels_en = set('aeiouy')
+    letters = [c for c in text_clean if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    vowel_count = sum(1 for c in letters if c in vowels_ru or c in vowels_en)
+    # Если меньше 20% гласных - возможно gibberish
+    return (vowel_count / len(letters)) < 0.2
+
+def check_spam_patterns(text, antiwords=None):
+    """
+    Проверяет текст на спам-паттерны и возвращает информацию о подозрительности
+
+    Возвращает: (is_spam: bool, reason: str, details: dict)
+    """
+    if not text:
+        return False, "", {}
+
+    details = {
+        'has_links': False,
+        'has_phone': False,
+        'emoji_count': 0,
+        'mention_count': 0,
+        'is_caps': False,
+        'has_repetitive': False,
+        'is_gibberish': False,
+        'has_antiwords': False
+    }
+
+    reasons = []
+
+    # Проверка на запрещенные слова
+    if antiwords:
+        text_lower = text.lower()
+        for aw in antiwords:
+            if aw.lower() in text_lower:
+                details['has_antiwords'] = True
+                reasons.append(f"запрещенное слово '{aw}'")
+                break
+
+    # Проверка ссылок
+    if has_links(text):
+        details['has_links'] = True
+        reasons.append("содержит ссылку")
+
+    # Проверка телефонов
+    if has_phone(text):
+        details['has_phone'] = True
+        reasons.append("содержит телефон")
+
+    # Подсчет эмодзи
+    emoji_count = count_emojis(text)
+    details['emoji_count'] = emoji_count
+    if emoji_count > 3:
+        reasons.append(f"много эмодзи ({emoji_count})")
+
+    # Подсчет упоминаний
+    mention_count = count_mentions(text)
+    details['mention_count'] = mention_count
+    if mention_count > 3:
+        reasons.append(f"много упоминаний ({mention_count})")
+
+    # Проверка CAPS
+    if is_mostly_caps(text):
+        details['is_caps'] = True
+        reasons.append("CAPS LOCK")
+
+    # Проверка повторяющихся символов
+    if has_repetitive_chars(text):
+        details['has_repetitive'] = True
+        reasons.append("повторяющиеся символы")
+
+    # Проверка на gibberish
+    if is_gibberish(text):
+        details['is_gibberish'] = True
+        reasons.append("бессмысленный текст")
+
+    # Особо опасные комбинации
+    is_spam = False
+    reason = ""
+
+    # Критичные паттерны (100% спам)
+    if details['has_antiwords']:
+        is_spam = True
+        reason = "критично: " + ", ".join(reasons)
+    elif details['has_phone'] and details['has_links']:
+        is_spam = True
+        reason = "критично: телефон + ссылка"
+    elif details['has_links'] and len(text.strip()) < 30:
+        is_spam = True
+        reason = "критично: короткое сообщение со ссылкой"
+    # Подозрительные комбинации
+    elif len(reasons) >= 3:
+        is_spam = True
+        reason = "подозрительно: " + ", ".join(reasons[:3])
+    elif details['mention_count'] > 5:
+        is_spam = True
+        reason = f"подозрительно: массовые упоминания ({mention_count})"
+
+    return is_spam, reason, details
+
+def log_spam_to_file(user_id, text, reason, details, log_file="spam_log.txt"):
+    """Логирует обнаруженный спам в отдельный файл"""
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"[{timestamp}] SPAM DETECTED\n")
+            f.write(f"User ID: {user_id}\n")
+            f.write(f"Reason: {reason}\n")
+            f.write(f"Details: {details}\n")
+            f.write(f"Text: {text[:200]}\n")
+            f.write(f"{'='*80}\n")
+    except Exception as e:
+        add_log(f"❌ Ошибка записи в лог спама: {e}")
+
 # ================== PRICE PATTERNS ==================
 _PRICE_CURRENCY_PATTERN = (
     r'(?:рублей|руб\.|руб|р\.|р|Р\.|Р|rub\.|rub|r\.|r|p\.|p|py6|₽|\u20bd|[оoO0])'
@@ -3207,42 +3399,81 @@ def vk_antispam_worker(
                         
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
                         if from_id > 0 and text:
+                            is_spam_detected = False
+                            spam_reason = ""
+                            spam_details = {}
+
+                            # Проверяем паттерны спама
+                            is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
+
                             # Проверяем есть ли в списке "новых"
                             if from_id in join_ts:
                                 time_since_join = current_time - join_ts[from_id]
-                                
+
                                 # Если написал слишком быстро после входа
                                 if 0 <= time_since_join <= window_sec:
-                                    add_log(f"⚠️ СПАМЕР ОБНАРУЖЕН! user_id={from_id} написал через {int(time_since_join)} сек")
-                                    add_log(f"   Текст: {text[:80]}...")
-                                    
-                                    # Удаляем сообщение
-                                    try:
-                                        delete_resp = vk_api_call(
-                                            "messages.delete",
-                                            vk_token,
-                                            {
-                                                "peer_id": peer_id,
-                                                "delete_for_all": 1,
-                                                "message_ids": message_id
-                                            },
-                                            timeout=5
-                                        )
-                                        if delete_resp:
-                                            add_log(f"🗑️ Сообщение удалено")
-                                    except Exception as e:
-                                        add_log(f"❌ Ошибка удаления сообщения: {e}")
-                                    
-                                    # Кикаем пользователя
-                                    vk_kick_user(
+                                    # Дополнительно проверяем паттерны
+                                    if is_spam_pattern:
+                                        # Это спам: написал быстро + есть спам-паттерны
+                                        is_spam_detected = True
+                                        spam_reason = f"новый пользователь ({int(time_since_join)}с) + {pattern_reason}"
+                                        spam_details = pattern_details
+                                    else:
+                                        # Написал быстро, но паттернов нет - возможно обычное приветствие
+                                        # Проверяем критичные признаки
+                                        if pattern_details.get('has_links') or pattern_details.get('has_phone'):
+                                            is_spam_detected = True
+                                            spam_reason = f"новый пользователь ({int(time_since_join)}с) + ссылка/телефон"
+                                            spam_details = pattern_details
+                                        else:
+                                            # Вероятно обычное приветствие, пропускаем
+                                            add_log(f"✅ Новый user_id={from_id} написал через {int(time_since_join)}с, но паттернов нет: {text[:50]}")
+                            else:
+                                # Старый пользователь - проверяем только критичные паттерны
+                                if is_spam_pattern:
+                                    # Критичный спам от старого пользователя
+                                    if pattern_details.get('has_antiwords') or \
+                                       (pattern_details.get('has_phone') and pattern_details.get('has_links')):
+                                        is_spam_detected = True
+                                        spam_reason = f"старый пользователь: {pattern_reason}"
+                                        spam_details = pattern_details
+
+                            # Если спам обнаружен - удаляем и кикаем
+                            if is_spam_detected:
+                                add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
+                                add_log(f"   Причина: {spam_reason}")
+                                add_log(f"   Текст: {text[:80]}...")
+
+                                # Логируем в файл
+                                log_spam_to_file(from_id, text, spam_reason, spam_details)
+
+                                # Удаляем сообщение
+                                try:
+                                    delete_resp = vk_api_call(
+                                        "messages.delete",
                                         vk_token,
-                                        vk_chat_id,
-                                        from_id,
-                                        reason=f"написал через {int(time_since_join)} сек после входа"
+                                        {
+                                            "peer_id": peer_id,
+                                            "delete_for_all": 1,
+                                            "message_ids": message_id
+                                        },
+                                        timeout=5
                                     )
-                                    
-                                    # Удаляем из отслеживания (чтобы не кикать повторно)
-                                    join_ts.pop(from_id, None)
+                                    if delete_resp:
+                                        add_log(f"🗑️ Сообщение удалено")
+                                except Exception as e:
+                                    add_log(f"❌ Ошибка удаления сообщения: {e}")
+
+                                # Кикаем пользователя
+                                vk_kick_user(
+                                    vk_token,
+                                    vk_chat_id,
+                                    from_id,
+                                    reason=spam_reason
+                                )
+
+                                # Удаляем из отслеживания (чтобы не кикать повторно)
+                                join_ts.pop(from_id, None)
             
             # Проверка на ошибку (нужно переподключиться)
             if "failed" in data:
@@ -3298,13 +3529,19 @@ def send_telegram_message(token, chat_id, text, photo_urls=None):
 
 def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, use_telegram, stop_event_obj, start_btn_ref, stop_btn_ref):
     add_log("🤖 bot_worker стартовал!")
-    # --- антиспам для VK беседы (кик, если написал в первые 60 сек после входа) ---
-    threading.Thread(
-        target=vk_antispam_worker,
-        args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, 120, 1),
-        daemon=True
-    ).start()
-    add_log("🛡️ Антиспам VK запущен (120 сек окно).")
+    # --- антиспам для VK беседы (кик, если написал в первые N сек после входа) ---
+    antispam_enabled = params.get("antispam_enabled", True)
+    antispam_window_sec = params.get("antispam_window_sec", 120)
+
+    if antispam_enabled:
+        threading.Thread(
+            target=vk_antispam_worker,
+            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1),
+            daemon=True
+        ).start()
+        add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек).")
+    else:
+        add_log("⚠️ Антиспам отключен в настройках.")
 
     sent_photos = load_sent_photos()
     add_log(f"Используемые параметры наценки: Процент: {params.get('price_percent')}, Дельта: {params.get('price_delta')}")
@@ -3687,6 +3924,18 @@ def main():
     add_super_paste(freq_entry)
 
     row_idx += 1
+    antispam_enabled_var = tk.BooleanVar(value=settings.get("antispam_enabled", True))
+    tk.Checkbutton(main_settings_frame, text="Включить антиспам", font=MED_FONT, bg=BG_FRAME, variable=antispam_enabled_var,
+                   activebackground=BG_FRAME, activeforeground="black", selectcolor=BG_FRAME, relief="flat").grid(row=row_idx, column=0, sticky="w", columnspan=2, pady=3, padx=(10,0))
+
+    row_idx += 1
+    tk.Label(main_settings_frame, text="Окно антиспама (сек):", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
+    antispam_window_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
+    antispam_window_entry.insert(0, str(settings.get("antispam_window_sec", 120)))
+    antispam_window_entry.grid(row=row_idx, column=1, sticky="w", pady=3, padx=(0,10))
+    add_super_paste(antispam_window_entry)
+
+    row_idx += 1
     tk.Label(main_settings_frame, text="Наценка %:", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
     price_percent_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
     price_percent_entry.insert(0, str(settings.get("price_percent", 0.0)))
@@ -3791,12 +4040,18 @@ def main():
             "mode": mode_var.get(),
             "count": count_hours_entry.get().strip() if mode_var.get() == "count" else None,
             "hours": count_hours_entry.get().strip() if mode_var.get() == "date" else None,
+            "antispam_enabled": antispam_enabled_var.get(),
+            "antispam_window_sec": antispam_window_entry.get().strip(),
         }
         try:
             params["freq"] = int(params["freq"])
             if params["freq"] < 10:
                 messagebox.showwarning("Предупреждение", "Частота парсинга должна быть не менее 10 секунд.")
                 params["freq"] = 10
+            params["antispam_window_sec"] = int(params["antispam_window_sec"])
+            if params["antispam_window_sec"] < 30:
+                messagebox.showwarning("Предупреждение", "Окно антиспама должно быть не менее 30 секунд.")
+                params["antispam_window_sec"] = 30
             params["price_percent"] = float(params["price_percent"])
             params["price_delta"] = int(params["price_delta"])
             if params["limit_photos"]:
@@ -3832,6 +4087,8 @@ def main():
             "mode": mode_var.get(),
             "count": params["count"],
             "hours": params["hours"],
+            "antispam_enabled": params["antispam_enabled"],
+            "antispam_window_sec": params["antispam_window_sec"],
         }
         save_settings(settings_to_save)
         add_log("Настройки сохранены.")
