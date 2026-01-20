@@ -3497,89 +3497,96 @@ def vk_antispam_worker(
                         
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
                         if from_id > 0 and text:
-                            is_spam_detected = False
-                            spam_reason = ""
-                            spam_details = {}
+                            # Админы могут писать всё что угодно - пропускаем проверку
+                            if not is_admin(from_id):
+                                is_spam_detected = False
+                                spam_reason = ""
+                                spam_details = {}
 
-                            # Проверяем паттерны спама
-                            is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
+                                # Проверяем паттерны спама
+                                is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
 
-                            # КРИТИЧНО: Проверка ссылок для не-админов
-                            # Ссылки могут отправлять ТОЛЬКО администраторы!
-                            if pattern_details.get('has_links') and not is_admin(from_id):
-                                is_spam_detected = True
-                                spam_reason = f"ссылка от не-админа (user_id={from_id})"
-                                spam_details = pattern_details
-                                add_log(f"🚫 НЕ-АДМИН отправил ссылку! user_id={from_id}")
+                                # СТРОГАЯ ПОЛИТИКА: ЛЮБОЙ признак спама = кик
+                                # Проверяем критичные признаки по отдельности
 
-                            # Проверяем есть ли в списке "новых"
-                            elif from_id in join_ts:
-                                time_since_join = current_time - join_ts[from_id]
+                                # 1. Ссылка от не-админа
+                                if pattern_details.get('has_links'):
+                                    is_spam_detected = True
+                                    spam_reason = "ссылка от не-админа"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Ссылка от не-админа! user_id={from_id}")
 
-                                # Если написал слишком быстро после входа
-                                if 0 <= time_since_join <= window_sec:
-                                    # Дополнительно проверяем паттерны
-                                    if is_spam_pattern:
-                                        # Это спам: написал быстро + есть спам-паттерны
-                                        is_spam_detected = True
-                                        spam_reason = f"новый пользователь ({int(time_since_join)}с) + {pattern_reason}"
-                                        spam_details = pattern_details
-                                    else:
-                                        # Написал быстро, но паттернов нет - возможно обычное приветствие
-                                        # Проверяем критичные признаки
-                                        if pattern_details.get('has_links') or pattern_details.get('has_phone'):
-                                            is_spam_detected = True
-                                            spam_reason = f"новый пользователь ({int(time_since_join)}с) + ссылка/телефон"
-                                            spam_details = pattern_details
-                                        else:
-                                            # Вероятно обычное приветствие, пропускаем
-                                            add_log(f"✅ Новый user_id={from_id} написал через {int(time_since_join)}с, но паттернов нет: {text[:50]}")
-                            else:
-                                # Старый пользователь - проверяем только критичные паттерны
-                                if is_spam_pattern:
-                                    # Критичный спам от старого пользователя
-                                    if pattern_details.get('has_antiwords') or \
-                                       (pattern_details.get('has_phone') and pattern_details.get('has_links')):
-                                        is_spam_detected = True
-                                        spam_reason = f"старый пользователь: {pattern_reason}"
-                                        spam_details = pattern_details
+                                # 2. Номер телефона
+                                elif pattern_details.get('has_phone'):
+                                    is_spam_detected = True
+                                    spam_reason = "номер телефона в сообщении"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Телефон в сообщении! user_id={from_id}")
 
-                            # Если спам обнаружен - удаляем и кикаем
-                            if is_spam_detected:
-                                add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
-                                add_log(f"   Причина: {spam_reason}")
-                                add_log(f"   Текст: {text[:80]}...")
+                                # 3. CAPS LOCK (>70% заглавных букв)
+                                elif pattern_details.get('is_caps'):
+                                    is_spam_detected = True
+                                    spam_reason = "CAPS LOCK (>70% заглавных)"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 CAPS сообщение! user_id={from_id}")
 
-                                # Логируем в файл
-                                log_spam_to_file(from_id, text, spam_reason, spam_details)
+                                # 4. Много эмодзи (>3)
+                                elif pattern_details.get('emoji_count', 0) > 3:
+                                    is_spam_detected = True
+                                    spam_reason = f"много эмодзи ({pattern_details['emoji_count']})"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Спам эмодзи! user_id={from_id}")
 
-                                # Удаляем сообщение
-                                try:
-                                    delete_resp = vk_api_call(
-                                        "messages.delete",
+                                # 5. Бессмысленный набор символов (gibberish)
+                                elif pattern_details.get('is_gibberish'):
+                                    is_spam_detected = True
+                                    spam_reason = "бессмысленный набор символов"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Gibberish! user_id={from_id}")
+
+                                # 6. Запрещенные слова из ANTIWORDS
+                                elif pattern_details.get('has_antiwords'):
+                                    is_spam_detected = True
+                                    spam_reason = "запрещенные слова"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Запрещенные слова! user_id={from_id}")
+
+                                # Если спам обнаружен - удаляем и кикаем
+                                if is_spam_detected:
+                                    add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
+                                    add_log(f"   Причина: {spam_reason}")
+                                    add_log(f"   Текст: {text[:80]}...")
+
+                                    # Логируем в файл
+                                    log_spam_to_file(from_id, text, spam_reason, spam_details)
+
+                                    # Удаляем сообщение
+                                    try:
+                                        delete_resp = vk_api_call(
+                                            "messages.delete",
+                                            vk_token,
+                                            {
+                                                "peer_id": peer_id,
+                                                "delete_for_all": 1,
+                                                "message_ids": message_id
+                                            },
+                                            timeout=5
+                                        )
+                                        if delete_resp:
+                                            add_log(f"🗑️ Сообщение удалено")
+                                    except Exception as e:
+                                        add_log(f"❌ Ошибка удаления сообщения: {e}")
+
+                                    # Кикаем пользователя
+                                    vk_kick_user(
                                         vk_token,
-                                        {
-                                            "peer_id": peer_id,
-                                            "delete_for_all": 1,
-                                            "message_ids": message_id
-                                        },
-                                        timeout=5
+                                        vk_chat_id,
+                                        from_id,
+                                        reason=spam_reason
                                     )
-                                    if delete_resp:
-                                        add_log(f"🗑️ Сообщение удалено")
-                                except Exception as e:
-                                    add_log(f"❌ Ошибка удаления сообщения: {e}")
 
-                                # Кикаем пользователя
-                                vk_kick_user(
-                                    vk_token,
-                                    vk_chat_id,
-                                    from_id,
-                                    reason=spam_reason
-                                )
-
-                                # Удаляем из отслеживания (чтобы не кикать повторно)
-                                join_ts.pop(from_id, None)
+                                    # Удаляем из отслеживания (чтобы не кикать повторно)
+                                    join_ts.pop(from_id, None)
             
             # Проверка на ошибку (нужно переподключиться)
             if "failed" in data:
