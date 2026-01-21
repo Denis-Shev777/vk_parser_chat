@@ -583,6 +583,10 @@ def log_spam_to_file(user_id, text, reason, details, log_file="spam_log.txt"):
     """Логирует обнаруженный спам в отдельный файл"""
     try:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_only = datetime.datetime.now().strftime("%Y-%m-%d")
+        time_only = datetime.datetime.now().strftime("%H:%M:%S")
+
+        # Детальный лог
         with open(log_file, 'a', encoding='utf-8') as f:
             f.write(f"\n{'='*80}\n")
             f.write(f"[{timestamp}] SPAM DETECTED\n")
@@ -591,8 +595,66 @@ def log_spam_to_file(user_id, text, reason, details, log_file="spam_log.txt"):
             f.write(f"Details: {details}\n")
             f.write(f"Text: {text[:200]}\n")
             f.write(f"{'='*80}\n")
+
+        # Краткая статистика (для быстрого просмотра)
+        stats_file = "spam_stats.txt"
+        with open(stats_file, 'a', encoding='utf-8') as f:
+            # Форматируем строку: дата | время | user_id | причина | краткий текст
+            short_text = text[:50].replace('\n', ' ')
+            f.write(f"{date_only} | {time_only} | ID:{user_id} | {reason} | {short_text}\n")
+
+        add_log(f"📝 Спам залогирован: {stats_file}")
+
     except Exception as e:
         add_log(f"❌ Ошибка записи в лог спама: {e}")
+
+def send_spam_alert_telegram(tg_token, tg_chat_id, user_id, reason, text):
+    """
+    Отправляет уведомление о спамере в Telegram
+
+    Args:
+        tg_token: Telegram bot token
+        tg_chat_id: Telegram chat ID для уведомлений
+        user_id: VK ID спамера
+        reason: Причина кика
+        text: Текст сообщения спамера
+    """
+    if not tg_token or not tg_chat_id:
+        return False
+
+    try:
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        vk_profile_link = f"https://vk.com/id{user_id}"
+        short_text = text[:100].replace('\n', ' ')
+
+        message = (
+            f"🚨 СПАМЕР ОБНАРУЖЕН И КИКНУТ\n\n"
+            f"⏰ Время: {timestamp}\n"
+            f"👤 User ID: {user_id}\n"
+            f"🔗 Профиль: {vk_profile_link}\n"
+            f"❗ Причина: {reason}\n\n"
+            f"💬 Текст:\n{short_text}"
+        )
+
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        data = {
+            "chat_id": tg_chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        response = requests.post(url, data=data, timeout=10)
+
+        if response.ok and response.json().get("ok"):
+            add_log(f"📱 Уведомление отправлено в Telegram")
+            return True
+        else:
+            add_log(f"⚠️ Ошибка отправки в Telegram: {response.text[:100]}")
+            return False
+
+    except Exception as e:
+        add_log(f"❌ Ошибка отправки уведомления в Telegram: {e}")
+        return False
 
 # ================== ADMIN WHITELIST FUNCTIONS ==================
 
@@ -3387,7 +3449,10 @@ def vk_antispam_worker(
     vk_chat_id: int,
     stop_event_obj,
     window_sec: int = 60,
-    poll_sec: int = 3
+    poll_sec: int = 3,
+    tg_token: str = None,
+    tg_chat_id: int = None,
+    notify_telegram: bool = True
 ):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с Long Poll - видит ВСЕ события в реальном времени!
@@ -3560,6 +3625,10 @@ def vk_antispam_worker(
                                     # Логируем в файл
                                     log_spam_to_file(from_id, text, spam_reason, spam_details)
 
+                                    # Отправляем уведомление в Telegram (если включено)
+                                    if notify_telegram and tg_token and tg_chat_id:
+                                        send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text)
+
                                     # Удаляем сообщение
                                     try:
                                         delete_resp = vk_api_call(
@@ -3647,12 +3716,16 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
     antispam_window_sec = params.get("antispam_window_sec", 120)
 
     if antispam_enabled:
+        # Проверяем настройку уведомлений в Telegram
+        notify_telegram = params.get("antispam_notify_telegram", True)
+
         threading.Thread(
             target=vk_antispam_worker,
-            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1),
+            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram),
             daemon=True
         ).start()
-        add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек).")
+        notify_status = "с уведомлениями в Telegram" if (notify_telegram and tg_token and tg_chat_id) else "без уведомлений"
+        add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек, {notify_status}).")
     else:
         add_log("⚠️ Антиспам отключен в настройках.")
 
@@ -4049,6 +4122,11 @@ def main():
     add_super_paste(antispam_window_entry)
 
     row_idx += 1
+    antispam_notify_telegram_var = tk.BooleanVar(value=settings.get("antispam_notify_telegram", True))
+    tk.Checkbutton(main_settings_frame, text="Уведомления о спамерах в Telegram", font=MED_FONT, bg=BG_FRAME, variable=antispam_notify_telegram_var,
+                   activebackground=BG_FRAME, activeforeground="black", selectcolor=BG_FRAME, relief="flat").grid(row=row_idx, column=0, sticky="w", columnspan=2, pady=3, padx=(10,0))
+
+    row_idx += 1
     tk.Label(main_settings_frame, text="Наценка %:", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
     price_percent_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
     price_percent_entry.insert(0, str(settings.get("price_percent", 0.0)))
@@ -4155,6 +4233,7 @@ def main():
             "hours": count_hours_entry.get().strip() if mode_var.get() == "date" else None,
             "antispam_enabled": antispam_enabled_var.get(),
             "antispam_window_sec": antispam_window_entry.get().strip(),
+            "antispam_notify_telegram": antispam_notify_telegram_var.get(),
         }
         try:
             params["freq"] = int(params["freq"])
@@ -4202,6 +4281,7 @@ def main():
             "hours": params["hours"],
             "antispam_enabled": params["antispam_enabled"],
             "antispam_window_sec": params["antispam_window_sec"],
+            "antispam_notify_telegram": params["antispam_notify_telegram"],
         }
         save_settings(settings_to_save)
         add_log("Настройки сохранены.")
