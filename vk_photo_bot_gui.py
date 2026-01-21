@@ -64,6 +64,20 @@ ANTIWORDS = [
     "лак", "для стирки", "зубная паста", "отбеливатель", "дезодорант", "утенок", "туалет"
 ]
 
+# ================== ADMIN WHITELIST ==================
+# Список администраторов, которым разрешено отправлять ссылки
+# Можно указывать как числовые ID, так и короткие имена (screen_name)
+# Пример: ["1055595410", "trendova_arina", "115693485"]
+ADMIN_WHITELIST = [
+    "1055595410",      # @id1055595410
+    "trendova_arina",  # https://vk.com/trendova_arina
+    "115693485",       # https://vk.com/id115693485
+    "irina_mod"        # https://vk.com/irina_mod
+]
+
+# Кэш для хранения преобразованных ID (screen_name -> numeric_id)
+_admin_id_cache = {}
+
 _global_log_window_instance = None
 stop_event = threading.Event()
 
@@ -387,6 +401,339 @@ def add_log(msg):
             print(f"Ошибка при добавлении в лог (Tkinter after): {e} - {log_message}")
     else:
         print(log_message)
+
+# ================== SPAM DETECTION FUNCTIONS ==================
+
+def count_emojis(text):
+    """Подсчитывает количество эмодзи в тексте"""
+    if not text:
+        return 0
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF"
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA70-\U0001FAFF"
+        "\u200d"
+        "\ufe0f"
+        "]+", flags=re.UNICODE)
+    return len(emoji_pattern.findall(text))
+
+def has_links(text):
+    """Проверяет наличие ссылок в тексте"""
+    if not text:
+        return False
+    # Проверка URL с протоколом
+    if re.search(r'\b(?:(?:https?|ftp)://|www\.)\S+', text, re.IGNORECASE):
+        return True
+    # Проверка доменов
+    if re.search(r'\b(?:[a-z0-9-]{1,63}\.)+(?:[a-z]{2,63})', text, re.IGNORECASE):
+        return True
+    return False
+
+def has_phone(text):
+    """Проверяет наличие телефонных номеров"""
+    if not text:
+        return False
+    phone_pattern = re.compile(
+        r'(\+7|8)?[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}'
+        r'|(?<=\s)\d{11}(?=\s|$)'
+    )
+    return bool(phone_pattern.search(text))
+
+def count_mentions(text):
+    """Подсчитывает количество упоминаний (@user)"""
+    if not text:
+        return 0
+    # Ищем @user или [id123|text]
+    mentions = re.findall(r'@[a-zA-Z0-9_]+|\[id\d+\|', text)
+    return len(mentions)
+
+def is_mostly_caps(text):
+    """Проверяет, написан ли текст в основном заглавными буквами (>70%)"""
+    if not text or len(text) < 5:
+        return False
+    # Считаем только буквы
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    caps_count = sum(1 for c in letters if c.isupper())
+    return (caps_count / len(letters)) > 0.7
+
+def has_repetitive_chars(text):
+    """Проверяет наличие повторяющихся символов (!!!, ???, ..., etc)"""
+    if not text:
+        return False
+    # Ищем 3+ одинаковых символа подряд
+    return bool(re.search(r'(.)\1{2,}', text))
+
+def is_gibberish(text):
+    """Проверяет на бессмысленный набор символов"""
+    if not text or len(text) < 5:
+        return False
+    # Удаляем пробелы и проверяем
+    text_clean = text.replace(' ', '').lower()
+    # Если нет гласных в русском или английском - подозрительно
+    vowels_ru = set('аеёиоуыэюя')
+    vowels_en = set('aeiouy')
+    letters = [c for c in text_clean if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    vowel_count = sum(1 for c in letters if c in vowels_ru or c in vowels_en)
+    # Если меньше 20% гласных - возможно gibberish
+    return (vowel_count / len(letters)) < 0.2
+
+def check_spam_patterns(text, antiwords=None):
+    """
+    Проверяет текст на спам-паттерны и возвращает информацию о подозрительности
+
+    Возвращает: (is_spam: bool, reason: str, details: dict)
+    """
+    if not text:
+        return False, "", {}
+
+    details = {
+        'has_links': False,
+        'has_phone': False,
+        'emoji_count': 0,
+        'mention_count': 0,
+        'is_caps': False,
+        'has_repetitive': False,
+        'is_gibberish': False,
+        'has_antiwords': False
+    }
+
+    reasons = []
+
+    # Проверка на запрещенные слова
+    if antiwords:
+        text_lower = text.lower()
+        for aw in antiwords:
+            if aw.lower() in text_lower:
+                details['has_antiwords'] = True
+                reasons.append(f"запрещенное слово '{aw}'")
+                break
+
+    # Проверка ссылок
+    if has_links(text):
+        details['has_links'] = True
+        reasons.append("содержит ссылку")
+
+    # Проверка телефонов
+    if has_phone(text):
+        details['has_phone'] = True
+        reasons.append("содержит телефон")
+
+    # Подсчет эмодзи
+    emoji_count = count_emojis(text)
+    details['emoji_count'] = emoji_count
+    if emoji_count > 3:
+        reasons.append(f"много эмодзи ({emoji_count})")
+
+    # Подсчет упоминаний
+    mention_count = count_mentions(text)
+    details['mention_count'] = mention_count
+    if mention_count > 3:
+        reasons.append(f"много упоминаний ({mention_count})")
+
+    # Проверка CAPS
+    if is_mostly_caps(text):
+        details['is_caps'] = True
+        reasons.append("CAPS LOCK")
+
+    # Проверка повторяющихся символов
+    if has_repetitive_chars(text):
+        details['has_repetitive'] = True
+        reasons.append("повторяющиеся символы")
+
+    # Проверка на gibberish
+    if is_gibberish(text):
+        details['is_gibberish'] = True
+        reasons.append("бессмысленный текст")
+
+    # Особо опасные комбинации
+    is_spam = False
+    reason = ""
+
+    # Критичные паттерны (100% спам)
+    if details['has_antiwords']:
+        is_spam = True
+        reason = "критично: " + ", ".join(reasons)
+    elif details['has_phone'] and details['has_links']:
+        is_spam = True
+        reason = "критично: телефон + ссылка"
+    elif details['has_links'] and len(text.strip()) < 30:
+        is_spam = True
+        reason = "критично: короткое сообщение со ссылкой"
+    # Подозрительные комбинации
+    elif len(reasons) >= 3:
+        is_spam = True
+        reason = "подозрительно: " + ", ".join(reasons[:3])
+    elif details['mention_count'] > 5:
+        is_spam = True
+        reason = f"подозрительно: массовые упоминания ({mention_count})"
+
+    return is_spam, reason, details
+
+def log_spam_to_file(user_id, text, reason, details, log_file="spam_log.txt"):
+    """Логирует обнаруженный спам в отдельный файл"""
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_only = datetime.datetime.now().strftime("%Y-%m-%d")
+        time_only = datetime.datetime.now().strftime("%H:%M:%S")
+
+        # Детальный лог
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"[{timestamp}] SPAM DETECTED\n")
+            f.write(f"User ID: {user_id}\n")
+            f.write(f"Reason: {reason}\n")
+            f.write(f"Details: {details}\n")
+            f.write(f"Text: {text[:200]}\n")
+            f.write(f"{'='*80}\n")
+
+        # Краткая статистика (для быстрого просмотра)
+        stats_file = "spam_stats.txt"
+        with open(stats_file, 'a', encoding='utf-8') as f:
+            # Форматируем строку: дата | время | user_id | причина | краткий текст
+            short_text = text[:50].replace('\n', ' ')
+            f.write(f"{date_only} | {time_only} | ID:{user_id} | {reason} | {short_text}\n")
+
+        add_log(f"📝 Спам залогирован: {stats_file}")
+
+    except Exception as e:
+        add_log(f"❌ Ошибка записи в лог спама: {e}")
+
+def send_spam_alert_telegram(tg_token, tg_chat_id, user_id, reason, text):
+    """
+    Отправляет уведомление о спамере в Telegram
+
+    Args:
+        tg_token: Telegram bot token
+        tg_chat_id: Telegram chat ID для уведомлений
+        user_id: VK ID спамера
+        reason: Причина кика
+        text: Текст сообщения спамера
+    """
+    if not tg_token or not tg_chat_id:
+        return False
+
+    try:
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        vk_profile_link = f"https://vk.com/id{user_id}"
+        short_text = text[:100].replace('\n', ' ')
+
+        message = (
+            f"🚨 СПАМЕР ОБНАРУЖЕН И КИКНУТ\n\n"
+            f"⏰ Время: {timestamp}\n"
+            f"👤 User ID: {user_id}\n"
+            f"🔗 Профиль: {vk_profile_link}\n"
+            f"❗ Причина: {reason}\n\n"
+            f"💬 Текст:\n{short_text}"
+        )
+
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        data = {
+            "chat_id": tg_chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        response = requests.post(url, data=data, timeout=10)
+
+        if response.ok and response.json().get("ok"):
+            add_log(f"📱 Уведомление отправлено в Telegram")
+            return True
+        else:
+            add_log(f"⚠️ Ошибка отправки в Telegram: {response.text[:100]}")
+            return False
+
+    except Exception as e:
+        add_log(f"❌ Ошибка отправки уведомления в Telegram: {e}")
+        return False
+
+# ================== ADMIN WHITELIST FUNCTIONS ==================
+
+def resolve_admin_ids(vk_token):
+    """
+    Преобразует короткие имена (screen_name) из ADMIN_WHITELIST в числовые ID
+    Кэширует результаты в _admin_id_cache
+    """
+    global _admin_id_cache
+
+    # Разделяем на числовые ID и screen_name
+    numeric_ids = []
+    screen_names = []
+
+    for admin in ADMIN_WHITELIST:
+        if str(admin).isdigit():
+            numeric_ids.append(int(admin))
+        else:
+            screen_names.append(admin)
+
+    # Если есть screen_name - конвертируем их через VK API
+    if screen_names:
+        try:
+            from urllib.parse import urlencode
+            user_ids_param = ",".join(screen_names)
+            params = {
+                "user_ids": user_ids_param,
+                "v": VK_API_VERSION,
+                "access_token": vk_token
+            }
+            url = f"https://api.vk.com/method/users.get?{urlencode(params)}"
+            response = requests.get(url, timeout=10).json()
+
+            if "response" in response:
+                for user in response["response"]:
+                    user_id = user.get("id")
+                    if user_id:
+                        numeric_ids.append(user_id)
+                        # Кэшируем соответствие screen_name -> id
+                        for sn in screen_names:
+                            if sn.lower() in [user.get("screen_name", "").lower(),
+                                             user.get("domain", "").lower()]:
+                                _admin_id_cache[sn] = user_id
+                                add_log(f"🔑 Админ '{sn}' -> ID {user_id}")
+            else:
+                add_log(f"⚠️ Не удалось получить ID для screen_name: {screen_names}")
+                add_log(f"   Ответ VK API: {response}")
+        except Exception as e:
+            add_log(f"❌ Ошибка при получении ID админов: {e}")
+
+    # Добавляем все известные числовые ID в кэш
+    for num_id in numeric_ids:
+        _admin_id_cache[str(num_id)] = num_id
+
+    return numeric_ids
+
+def is_admin(user_id):
+    """
+    Проверяет, является ли пользователь администратором
+
+    Args:
+        user_id: числовой ID пользователя VK
+
+    Returns:
+        bool: True если админ, False если нет
+    """
+    if not user_id:
+        return False
+
+    # Проверяем в кэше преобразованных ID
+    user_id_str = str(user_id)
+    if user_id in _admin_id_cache.values() or user_id_str in _admin_id_cache:
+        return True
+
+    # Проверяем напрямую в ADMIN_WHITELIST (если указан числовой ID)
+    if user_id_str in ADMIN_WHITELIST or user_id in ADMIN_WHITELIST:
+        return True
+
+    return False
 
 # ================== PRICE PATTERNS ==================
 _PRICE_CURRENCY_PATTERN = (
@@ -3102,7 +3449,10 @@ def vk_antispam_worker(
     vk_chat_id: int,
     stop_event_obj,
     window_sec: int = 60,
-    poll_sec: int = 3
+    poll_sec: int = 3,
+    tg_token: str = None,
+    tg_chat_id: int = None,
+    notify_telegram: bool = True
 ):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с Long Poll - видит ВСЕ события в реальном времени!
@@ -3146,7 +3496,12 @@ def vk_antispam_worker(
     if not get_longpoll_server():
         add_log("❌ Антиспам: не удалось подключиться к Long Poll. Остановка.")
         return
-    
+
+    # Получаем ID админов из whitelist
+    add_log(f"🔑 Загрузка whitelist администраторов...")
+    admin_ids = resolve_admin_ids(vk_token)
+    add_log(f"✅ Админов в whitelist: {len(admin_ids)}")
+
     add_log(f"👂 Антиспам: слушаю чат {vk_peer_id}, окно {window_sec} сек")
     
     # Основной цикл Long Poll
@@ -3207,15 +3562,73 @@ def vk_antispam_worker(
                         
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
                         if from_id > 0 and text:
-                            # Проверяем есть ли в списке "новых"
-                            if from_id in join_ts:
-                                time_since_join = current_time - join_ts[from_id]
-                                
-                                # Если написал слишком быстро после входа
-                                if 0 <= time_since_join <= window_sec:
-                                    add_log(f"⚠️ СПАМЕР ОБНАРУЖЕН! user_id={from_id} написал через {int(time_since_join)} сек")
+                            # Админы могут писать всё что угодно - пропускаем проверку
+                            if not is_admin(from_id):
+                                is_spam_detected = False
+                                spam_reason = ""
+                                spam_details = {}
+
+                                # Проверяем паттерны спама
+                                is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
+
+                                # СТРОГАЯ ПОЛИТИКА: ЛЮБОЙ признак спама = кик
+                                # Проверяем критичные признаки по отдельности
+
+                                # 1. Ссылка от не-админа
+                                if pattern_details.get('has_links'):
+                                    is_spam_detected = True
+                                    spam_reason = "ссылка от не-админа"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Ссылка от не-админа! user_id={from_id}")
+
+                                # 2. Номер телефона
+                                elif pattern_details.get('has_phone'):
+                                    is_spam_detected = True
+                                    spam_reason = "номер телефона в сообщении"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Телефон в сообщении! user_id={from_id}")
+
+                                # 3. CAPS LOCK (>70% заглавных букв)
+                                elif pattern_details.get('is_caps'):
+                                    is_spam_detected = True
+                                    spam_reason = "CAPS LOCK (>70% заглавных)"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 CAPS сообщение! user_id={from_id}")
+
+                                # 4. Много эмодзи (>3)
+                                elif pattern_details.get('emoji_count', 0) > 3:
+                                    is_spam_detected = True
+                                    spam_reason = f"много эмодзи ({pattern_details['emoji_count']})"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Спам эмодзи! user_id={from_id}")
+
+                                # 5. Бессмысленный набор символов (gibberish)
+                                elif pattern_details.get('is_gibberish'):
+                                    is_spam_detected = True
+                                    spam_reason = "бессмысленный набор символов"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Gibberish! user_id={from_id}")
+
+                                # 6. Запрещенные слова из ANTIWORDS
+                                elif pattern_details.get('has_antiwords'):
+                                    is_spam_detected = True
+                                    spam_reason = "запрещенные слова"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Запрещенные слова! user_id={from_id}")
+
+                                # Если спам обнаружен - удаляем и кикаем
+                                if is_spam_detected:
+                                    add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
+                                    add_log(f"   Причина: {spam_reason}")
                                     add_log(f"   Текст: {text[:80]}...")
-                                    
+
+                                    # Логируем в файл
+                                    log_spam_to_file(from_id, text, spam_reason, spam_details)
+
+                                    # Отправляем уведомление в Telegram (если включено)
+                                    if notify_telegram and tg_token and tg_chat_id:
+                                        send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text)
+
                                     # Удаляем сообщение
                                     try:
                                         delete_resp = vk_api_call(
@@ -3232,15 +3645,15 @@ def vk_antispam_worker(
                                             add_log(f"🗑️ Сообщение удалено")
                                     except Exception as e:
                                         add_log(f"❌ Ошибка удаления сообщения: {e}")
-                                    
+
                                     # Кикаем пользователя
                                     vk_kick_user(
                                         vk_token,
                                         vk_chat_id,
                                         from_id,
-                                        reason=f"написал через {int(time_since_join)} сек после входа"
+                                        reason=spam_reason
                                     )
-                                    
+
                                     # Удаляем из отслеживания (чтобы не кикать повторно)
                                     join_ts.pop(from_id, None)
             
@@ -3298,13 +3711,23 @@ def send_telegram_message(token, chat_id, text, photo_urls=None):
 
 def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, use_telegram, stop_event_obj, start_btn_ref, stop_btn_ref):
     add_log("🤖 bot_worker стартовал!")
-    # --- антиспам для VK беседы (кик, если написал в первые 60 сек после входа) ---
-    threading.Thread(
-        target=vk_antispam_worker,
-        args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, 120, 1),
-        daemon=True
-    ).start()
-    add_log("🛡️ Антиспам VK запущен (120 сек окно).")
+    # --- антиспам для VK беседы (кик, если написал в первые N сек после входа) ---
+    antispam_enabled = params.get("antispam_enabled", True)
+    antispam_window_sec = params.get("antispam_window_sec", 120)
+
+    if antispam_enabled:
+        # Проверяем настройку уведомлений в Telegram
+        notify_telegram = params.get("antispam_notify_telegram", True)
+
+        threading.Thread(
+            target=vk_antispam_worker,
+            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram),
+            daemon=True
+        ).start()
+        notify_status = "с уведомлениями в Telegram" if (notify_telegram and tg_token and tg_chat_id) else "без уведомлений"
+        add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек, {notify_status}).")
+    else:
+        add_log("⚠️ Антиспам отключен в настройках.")
 
     sent_photos = load_sent_photos()
     add_log(f"Используемые параметры наценки: Процент: {params.get('price_percent')}, Дельта: {params.get('price_delta')}")
@@ -3687,6 +4110,23 @@ def main():
     add_super_paste(freq_entry)
 
     row_idx += 1
+    antispam_enabled_var = tk.BooleanVar(value=settings.get("antispam_enabled", True))
+    tk.Checkbutton(main_settings_frame, text="Включить антиспам", font=MED_FONT, bg=BG_FRAME, variable=antispam_enabled_var,
+                   activebackground=BG_FRAME, activeforeground="black", selectcolor=BG_FRAME, relief="flat").grid(row=row_idx, column=0, sticky="w", columnspan=2, pady=3, padx=(10,0))
+
+    row_idx += 1
+    tk.Label(main_settings_frame, text="Окно антиспама (сек):", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
+    antispam_window_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
+    antispam_window_entry.insert(0, str(settings.get("antispam_window_sec", 120)))
+    antispam_window_entry.grid(row=row_idx, column=1, sticky="w", pady=3, padx=(0,10))
+    add_super_paste(antispam_window_entry)
+
+    row_idx += 1
+    antispam_notify_telegram_var = tk.BooleanVar(value=settings.get("antispam_notify_telegram", True))
+    tk.Checkbutton(main_settings_frame, text="Уведомления о спамерах в Telegram", font=MED_FONT, bg=BG_FRAME, variable=antispam_notify_telegram_var,
+                   activebackground=BG_FRAME, activeforeground="black", selectcolor=BG_FRAME, relief="flat").grid(row=row_idx, column=0, sticky="w", columnspan=2, pady=3, padx=(10,0))
+
+    row_idx += 1
     tk.Label(main_settings_frame, text="Наценка %:", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
     price_percent_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
     price_percent_entry.insert(0, str(settings.get("price_percent", 0.0)))
@@ -3791,12 +4231,19 @@ def main():
             "mode": mode_var.get(),
             "count": count_hours_entry.get().strip() if mode_var.get() == "count" else None,
             "hours": count_hours_entry.get().strip() if mode_var.get() == "date" else None,
+            "antispam_enabled": antispam_enabled_var.get(),
+            "antispam_window_sec": antispam_window_entry.get().strip(),
+            "antispam_notify_telegram": antispam_notify_telegram_var.get(),
         }
         try:
             params["freq"] = int(params["freq"])
             if params["freq"] < 10:
                 messagebox.showwarning("Предупреждение", "Частота парсинга должна быть не менее 10 секунд.")
                 params["freq"] = 10
+            params["antispam_window_sec"] = int(params["antispam_window_sec"])
+            if params["antispam_window_sec"] < 30:
+                messagebox.showwarning("Предупреждение", "Окно антиспама должно быть не менее 30 секунд.")
+                params["antispam_window_sec"] = 30
             params["price_percent"] = float(params["price_percent"])
             params["price_delta"] = int(params["price_delta"])
             if params["limit_photos"]:
@@ -3832,6 +4279,9 @@ def main():
             "mode": mode_var.get(),
             "count": params["count"],
             "hours": params["hours"],
+            "antispam_enabled": params["antispam_enabled"],
+            "antispam_window_sec": params["antispam_window_sec"],
+            "antispam_notify_telegram": params["antispam_notify_telegram"],
         }
         save_settings(settings_to_save)
         add_log("Настройки сохранены.")
