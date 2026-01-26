@@ -3559,7 +3559,69 @@ def vk_antispam_worker(
                                     # Очистка старых записей (старше 5 минут)
                                     cutoff = current_time - 300
                                     join_ts = {uid: jt for uid, jt in join_ts.items() if jt > cutoff}
-                        
+
+                        # === ПРОВЕРКА "ТОЛЬКО КАРТИНКА" ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ ===
+                        # Кикаем новых пользователей, которые отправляют картинки без текста
+                        if from_id > 0 and not is_admin(from_id):
+                            # Проверяем, есть ли вложения (картинки, документы и т.д.)
+                            has_attachments = any(k.startswith("attach") and k.endswith("_type") for k in extra.keys())
+
+                            # Если новый пользователь (в окне антиспама)
+                            if from_id in join_ts:
+                                time_since_join = current_time - join_ts[from_id]
+
+                                # Если в пределах окна антиспама
+                                if 0 <= time_since_join <= window_sec:
+                                    # Если есть вложения, но нет текста (или текст очень короткий)
+                                    if has_attachments and (not text or len(text.strip()) < 3):
+                                        add_log(f"🚫 Только картинка без текста от нового пользователя! user_id={from_id}")
+                                        add_log(f"   Время с момента входа: {int(time_since_join)} сек")
+
+                                        spam_reason = "только картинка без текста (новый пользователь)"
+                                        spam_details = {
+                                            'has_attachments': True,
+                                            'text_length': len(text) if text else 0,
+                                            'time_since_join': int(time_since_join)
+                                        }
+
+                                        # Логируем в файл
+                                        log_spam_to_file(from_id, text or "[без текста, только картинка]", spam_reason, spam_details)
+
+                                        # Отправляем уведомление в Telegram (если включено)
+                                        if notify_telegram and tg_token and tg_chat_id:
+                                            send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text or "[без текста]")
+
+                                        # Удаляем сообщение
+                                        try:
+                                            delete_resp = vk_api_call(
+                                                "messages.delete",
+                                                vk_token,
+                                                {
+                                                    "peer_id": peer_id,
+                                                    "delete_for_all": 1,
+                                                    "message_ids": message_id
+                                                },
+                                                timeout=5
+                                            )
+                                            if delete_resp:
+                                                add_log(f"🗑️ Сообщение (картинка) удалено")
+                                        except Exception as e:
+                                            add_log(f"❌ Ошибка удаления сообщения: {e}")
+
+                                        # Кикаем пользователя
+                                        vk_kick_user(
+                                            vk_token,
+                                            vk_chat_id,
+                                            from_id,
+                                            reason=spam_reason
+                                        )
+
+                                        # Удаляем из отслеживания (чтобы не кикать повторно)
+                                        join_ts.pop(from_id, None)
+
+                                        # Переходим к следующему событию (не проверяем текст)
+                                        continue
+
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
                         if from_id > 0 and text:
                             # Админы могут писать всё что угодно - пропускаем проверку
@@ -3656,7 +3718,111 @@ def vk_antispam_worker(
 
                                     # Удаляем из отслеживания (чтобы не кикать повторно)
                                     join_ts.pop(from_id, None)
-            
+
+                    # Тип события 5 = редактирование сообщения
+                    elif update[0] == 5:
+                        message_id = update[1]
+                        flags = update[2]
+                        peer_id = update[3]
+                        timestamp = update[4]
+                        text = update[5]
+                        extra = update[6] if len(update) > 6 else {}
+
+                        # Только наш чат
+                        if peer_id != vk_peer_id:
+                            continue
+
+                        from_id = int(extra.get("from", 0)) if extra.get("from") else 0
+
+                        # === ПРОВЕРКА ОТРЕДАКТИРОВАННЫХ СООБЩЕНИЙ ===
+                        if from_id > 0 and text and not is_admin(from_id):
+                            add_log(f"✏️ Обнаружено редактирование сообщения от user_id={from_id}")
+
+                            is_spam_detected = False
+                            spam_reason = ""
+                            spam_details = {}
+
+                            # Проверяем паттерны спама в отредактированном тексте
+                            is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
+
+                            # Проверяем каждый признак спама
+                            if pattern_details.get('has_links'):
+                                is_spam_detected = True
+                                spam_reason = "ссылка в отредактированном сообщении"
+                                spam_details = pattern_details
+                                add_log(f"🚫 Ссылка в редакции! user_id={from_id}")
+
+                            elif pattern_details.get('has_phone'):
+                                is_spam_detected = True
+                                spam_reason = "телефон в отредактированном сообщении"
+                                spam_details = pattern_details
+                                add_log(f"🚫 Телефон в редакции! user_id={from_id}")
+
+                            elif pattern_details.get('is_caps'):
+                                is_spam_detected = True
+                                spam_reason = "CAPS в отредактированном сообщении"
+                                spam_details = pattern_details
+                                add_log(f"🚫 CAPS в редакции! user_id={from_id}")
+
+                            elif pattern_details.get('emoji_count', 0) > 3:
+                                is_spam_detected = True
+                                spam_reason = f"много эмодзи в редакции ({pattern_details['emoji_count']})"
+                                spam_details = pattern_details
+                                add_log(f"🚫 Спам эмодзи в редакции! user_id={from_id}")
+
+                            elif pattern_details.get('is_gibberish'):
+                                is_spam_detected = True
+                                spam_reason = "gibberish в отредактированном сообщении"
+                                spam_details = pattern_details
+                                add_log(f"🚫 Gibberish в редакции! user_id={from_id}")
+
+                            elif pattern_details.get('has_antiwords'):
+                                is_spam_detected = True
+                                spam_reason = "запрещенные слова в редакции"
+                                spam_details = pattern_details
+                                add_log(f"🚫 Запрещенные слова в редакции! user_id={from_id}")
+
+                            # Если спам обнаружен в редакции - удаляем и кикаем
+                            if is_spam_detected:
+                                add_log(f"⚠️ СПАМ В РЕДАКТИРОВАНИИ! user_id={from_id}")
+                                add_log(f"   Причина: {spam_reason}")
+                                add_log(f"   Текст: {text[:80]}...")
+
+                                # Логируем в файл
+                                log_spam_to_file(from_id, text, spam_reason, spam_details)
+
+                                # Отправляем уведомление в Telegram (если включено)
+                                if notify_telegram and tg_token and tg_chat_id:
+                                    send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text)
+
+                                # Удаляем сообщение
+                                try:
+                                    delete_resp = vk_api_call(
+                                        "messages.delete",
+                                        vk_token,
+                                        {
+                                            "peer_id": peer_id,
+                                            "delete_for_all": 1,
+                                            "message_ids": message_id
+                                        },
+                                        timeout=5
+                                    )
+                                    if delete_resp:
+                                        add_log(f"🗑️ Отредактированное сообщение удалено")
+                                except Exception as e:
+                                    add_log(f"❌ Ошибка удаления отредактированного сообщения: {e}")
+
+                                # Кикаем пользователя
+                                vk_kick_user(
+                                    vk_token,
+                                    vk_chat_id,
+                                    from_id,
+                                    reason=spam_reason
+                                )
+
+                                # Удаляем из отслеживания (чтобы не кикать повторно)
+                                join_ts.pop(from_id, None)
+
             # Проверка на ошибку (нужно переподключиться)
             if "failed" in data:
                 add_log("⚠️ Антиспам: Long Poll сбой, переподключение...")
@@ -3713,7 +3879,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
     add_log("🤖 bot_worker стартовал!")
     # --- антиспам для VK беседы (кик, если написал в первые N сек после входа) ---
     antispam_enabled = params.get("antispam_enabled", True)
-    antispam_window_sec = params.get("antispam_window_sec", 120)
+    antispam_window_sec = params.get("antispam_window_sec", 300)
 
     if antispam_enabled:
         # Проверяем настройку уведомлений в Telegram
@@ -4117,7 +4283,7 @@ def main():
     row_idx += 1
     tk.Label(main_settings_frame, text="Окно антиспама (сек):", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
     antispam_window_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
-    antispam_window_entry.insert(0, str(settings.get("antispam_window_sec", 120)))
+    antispam_window_entry.insert(0, str(settings.get("antispam_window_sec", 300)))
     antispam_window_entry.grid(row=row_idx, column=1, sticky="w", pady=3, padx=(0,10))
     add_super_paste(antispam_window_entry)
 
