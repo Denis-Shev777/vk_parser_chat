@@ -623,9 +623,11 @@ def send_spam_alert_telegram(tg_token, tg_chat_id, user_id, reason, text):
         return False
 
     try:
+        import html
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         vk_profile_link = f"https://vk.com/id{user_id}"
-        short_text = text[:100].replace('\n', ' ')
+        # Экранируем HTML теги в тексте спамера
+        short_text = html.escape(text[:100]).replace('\n', ' ')
 
         message = (
             f"🚨 СПАМЕР ОБНАРУЖЕН И КИКНУТ\n\n"
