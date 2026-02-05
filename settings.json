@@ -6,7 +6,7 @@
     "sources": [
         "https://vk.ru/clubgirlandboys2000"
     ],
-    "start_time": "06:00",
+    "start_time": "07:00",
     "end_time": "23:00",
     "freq": 360,
     "price_percent": 50.0,
@@ -18,5 +18,7 @@
     "limit_photos_count": 4,
     "mode": "date",
     "count": null,
-    "hours": 24
+    "hours": 24,
+    "order_notify_enabled": true,
+    "order_notify_vk_id": "irina_mod"
 }
