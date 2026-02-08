@@ -4615,4 +4615,8 @@ def main():
     root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    if not HAS_TKINTER:
+        from run_server import main as server_main
+        server_main()
+    else:
+        main()
