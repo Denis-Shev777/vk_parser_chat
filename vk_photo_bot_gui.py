@@ -1,6 +1,11 @@
 # ================== VK + Telegram Photo Bot GUI ==================
-import tkinter as tk
-from tkinter import messagebox, font, scrolledtext, simpledialog
+try:
+    import tkinter as tk
+    from tkinter import messagebox, font, scrolledtext, simpledialog
+    HAS_TKINTER = True
+except ImportError:
+    tk = None
+    HAS_TKINTER = False
 import threading
 import time
 import requests
@@ -17,9 +22,15 @@ import traceback
 import math
 import sys
 import asyncio
-from rapidfuzz import fuzz
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+try:
+    from rapidfuzz import fuzz
+except ImportError:
+    fuzz = None
+try:
+    from telegram import Update
+    from telegram.ext import Application, MessageHandler, filters, ContextTypes
+except BaseException:
+    Update = None
 
 SETTINGS_FILE = "settings.json"
 SENT_IDS_FILE = "sent_post_ids"
@@ -30,7 +41,7 @@ DEFAULT_SETTINGS = {
     "vk_token": "",
     "vk_chat_id": "",
     "sources": [],
-    "start_time": "06:00",
+    "start_time": "07:00",
     "end_time": "23:00",
     "freq": 360,
     "price_percent": 50,
@@ -42,7 +53,9 @@ DEFAULT_SETTINGS = {
     "limit_photos_count": 4,
     "mode": "date",
     "count": None,
-    "hours": 24
+    "hours": 24,
+    "order_notify_enabled": False,
+    "order_notify_vk_id": ""
 }
 MY_USER_ID = "DenisTest"
 CSV_URL = "https://docs.google.com/spreadsheets/d/12BcHBsDRjqR60T8ClR5VXugdMPOXhEpPPTov5-bIAmY/export?format=csv&gid=0"
@@ -288,7 +301,7 @@ def remove_base_stopwords(text, stopwords):
     return '\n'.join(cleaned_lines)
 
 BASE_STOPWORDS = [
-    "распродажа", "принимаю заказы", "принимаю ы", "модный базар", "продается", "только", "поставщик", 
+    "распродажа", "принимаю заказы", "принимаю ы", "модный базар", "продается", "только", "поставщик",
     "РЫНОК", "АДРЕС", "НАШ", "АКЦИЯ", "Номер для заказа", "WhatsApp5",
     "корпус", "упаковка", "расцветка в упаковке как на фото", "наша группа",
     "бронь", "бронировать", "бронирование", "идут", "тянуться", "тянутся", "хорошо", "в размер",
@@ -300,6 +313,98 @@ BASE_STOPWORDS = [
     "упаковка", "в упаковка", "в упаковке", "упаковки", "лучше будет",
     "Модный базар", "Садовод", "🛍🛍️🎀Модный базар🎀 🛍🛍️", "👉Садовод", "🎀Модный", "заказы"
 ]
+
+# ================== ORDER DETECTION KEYWORDS ==================
+# Ключевые слова для определения заказов в чате
+# Включает вариации с опечатками и разным написанием
+ORDER_KEYWORDS = [
+    # Заказ и вариации (+ опечатки)
+    "заказ", "заказать", "закажу", "заказываю", "зказ", "заказа", "закас",
+    "оформить заказ", "оформляю заказ", "хочу заказать",
+
+    # Размеры (главный индикатор!) + опечатки
+    "размер", "размеры", "розмер", "розмір", "рамер", "размерчик", "рзмр",
+    "какой размер", "какие размеры", "есть размер", "нужен размер",
+    "36 размер", "37 размер", "38 размер", "39 размер", "40 размер",
+    "41 размер", "42 размер", "43 размер", "44 размер", "45 размер",
+    "р 36", "р 37", "р 38", "р 39", "р 40", "р 41", "р 42", "р 43", "р 44",
+    "р.36", "р.37", "р.38", "р.39", "р.40", "р.41", "р.42", "р.43", "р.44",
+    "размер 36", "размер 37", "размер 38", "размер 39", "размер 40",
+
+    # Посадка/размерность + опечатки
+    "маломерит", "маломерят", "маломерка", "маломерки", "маломер", "мало мерит",
+    "большемерит", "большемерят", "большемерка", "большемер", "больше мерит",
+    "в размер", "идут в размер", "по размеру", "размер в размер",
+    "на широкую ногу", "на узкую ногу", "полнота", "полноразмерные",
+
+    # Сезон + опечатки
+    "сезон", "сизон", "какой сезон", "на какой сезон", "для какого сезона",
+    "зима", "зимние", "зимняя", "зімові", "на зиму",
+    "лето", "летние", "летняя", "літні", "на лето",
+    "весна", "осень", "демисезон", "деми", "демисезонные",
+
+    # Материал + опечатки
+    "материал", "матеріал", "материял", "матерьял", "матириал",
+    "из чего", "из какого материала", "что за материал",
+    "кожа", "кожаные", "натуральная кожа", "нат кожа", "натуралка",
+    "эко кожа", "экокожа", "эко-кожа", "кожзам", "искусственная",
+    "замша", "замшевые", "текстиль", "ткань",
+
+    # Покупка/интерес + опечатки
+    "беру", "возьму", "забираю", "куплю", "покупаю", "бяру", "вазьму",
+    "хочу купить", "хочу взять", "мне нужно", "мне нужны", "мне нужен",
+
+    # Цена + опечатки
+    "сколько стоит", "скільки коштує", "какая цена", "почем", "почём",
+    "цена", "ціна", "прайс", "стоимость", "по чем",
+
+    # Наличие
+    "есть в наличии", "в наличии есть", "наличие", "є в наявності",
+    "есть ли", "имеется", "остались",
+
+    # Оплата/доставка
+    "оплата", "оплатить", "оплачу", "как оплатить",
+    "доставка", "доставку", "как доставка", "куда доставка",
+    "отправка", "отправить", "отправляете",
+
+    # Бронь
+    "отложите", "отложи", "придержите", "забронируйте", "забронировать",
+]
+
+# Московское время (UTC+3)
+MSK_TZ = datetime.timezone(datetime.timedelta(hours=3))
+
+def check_order_keywords(text):
+    """
+    Проверяет, содержит ли сообщение ключевые слова заказа.
+    Возвращает (True, matched_keyword) или (False, None).
+    """
+    if not text:
+        return False, None
+    text_lower = text.lower()
+    for keyword in ORDER_KEYWORDS:
+        if keyword.lower() in text_lower:
+            return True, keyword
+    return False, None
+
+def send_order_notification_vk(vk_token, admin_user_id, from_id, message_text, peer_id):
+    """
+    Отправляет уведомление о заказе администратору в личные сообщения VK.
+    """
+    try:
+        chat_number = peer_id - 2000000000
+        notification = (
+            f"New order in chat!\n\n"
+            f"From: https://vk.com/id{from_id}\n"
+            f"Message: {message_text[:500]}\n\n"
+            f"Go to chat: https://vk.com/im?sel=c{chat_number}"
+        )
+        send_vk_message(vk_token, admin_user_id, notification)
+        add_log(f"[ORDER] Notification sent to admin (user_id={admin_user_id})")
+        return True
+    except Exception as e:
+        add_log(f"[ORDER ERROR] Failed to send order notification: {e}")
+        return False
 
 def clean_full_text(text):
     # 1. Удаляем стоп-слова и неинформативные строки
@@ -3452,16 +3557,19 @@ def vk_antispam_worker(
     poll_sec: int = 3,
     tg_token: str = None,
     tg_chat_id: int = None,
-    notify_telegram: bool = True
+    notify_telegram: bool = True,
+    order_notify_enabled: bool = False,
+    order_notify_user_id: int = None
 ):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с Long Poll - видит ВСЕ события в реальном времени!
-    
+
     Логика:
     1) Подключаемся к Long Poll серверу VK
     2) Получаем события в реальном времени (входы, сообщения)
     3) Отслеживаем кто и когда зашел
     4) Если пишет в течение window_sec после входа → кикаем
+    5) Если сообщение содержит ключевые слова заказа → уведомляем админа
     """
     add_log(f"🛡️ Антиспам: подключение к Long Poll...")
     
@@ -3718,6 +3826,13 @@ def vk_antispam_worker(
 
                                     # Удаляем из отслеживания (чтобы не кикать повторно)
                                     join_ts.pop(from_id, None)
+                                else:
+                                    # === ПРОВЕРКА ЗАКАЗОВ (только если НЕ спам) ===
+                                    if order_notify_enabled and order_notify_user_id:
+                                        is_order, matched_keyword = check_order_keywords(text)
+                                        if is_order:
+                                            add_log(f"[ORDER] Detected from user_id={from_id}, keyword='{matched_keyword}', text: {text[:100]}...")
+                                            send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id)
 
                     # Тип события 5 = редактирование сообщения
                     elif update[0] == 5:
@@ -3875,11 +3990,40 @@ def send_telegram_message(token, chat_id, text, photo_urls=None):
         add_log(f"Ошибка при отправке сообщения в Telegram: {traceback.format_exc()}")
         return False
 
-def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, use_telegram, stop_event_obj, start_btn_ref, stop_btn_ref):
+def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, use_telegram, stop_event_obj, start_btn_ref=None, stop_btn_ref=None):
     add_log("🤖 bot_worker стартовал!")
     # --- антиспам для VK беседы (кик, если написал в первые N сек после входа) ---
     antispam_enabled = params.get("antispam_enabled", True)
     antispam_window_sec = params.get("antispam_window_sec", 300)
+
+    # --- уведомления о заказах ---
+    order_notify_enabled = params.get("order_notify_enabled", False)
+    order_notify_vk_id_raw = params.get("order_notify_vk_id", "")
+    order_notify_user_id = None
+
+    if order_notify_enabled and order_notify_vk_id_raw:
+        # Конвертируем screen_name или numeric ID в числовой ID
+        if str(order_notify_vk_id_raw).isdigit():
+            order_notify_user_id = int(order_notify_vk_id_raw)
+        else:
+            try:
+                from urllib.parse import urlencode
+                resp = requests.get(
+                    f"https://api.vk.com/method/users.get",
+                    params={"user_ids": order_notify_vk_id_raw, "v": VK_API_VERSION, "access_token": vk_token},
+                    timeout=10
+                ).json()
+                if "response" in resp and resp["response"]:
+                    order_notify_user_id = resp["response"][0].get("id")
+                    add_log(f"[ORDER] '{order_notify_vk_id_raw}' -> user_id={order_notify_user_id}")
+            except Exception as e:
+                add_log(f"[ORDER ERROR] Cannot resolve '{order_notify_vk_id_raw}': {e}")
+
+        if order_notify_user_id:
+            add_log(f"[ORDER] Order notifications enabled -> user_id={order_notify_user_id}")
+        else:
+            add_log(f"[ORDER WARNING] Cannot resolve VK ID '{order_notify_vk_id_raw}', order notifications disabled")
+            order_notify_enabled = False
 
     if antispam_enabled:
         # Проверяем настройку уведомлений в Telegram
@@ -3887,11 +4031,22 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
 
         threading.Thread(
             target=vk_antispam_worker,
-            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram),
+            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram,
+                  order_notify_enabled, order_notify_user_id),
             daemon=True
         ).start()
         notify_status = "с уведомлениями в Telegram" if (notify_telegram and tg_token and tg_chat_id) else "без уведомлений"
-        add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек, {notify_status}).")
+        order_status = ", заказы -> ЛС" if order_notify_enabled else ""
+        add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек, {notify_status}{order_status}).")
+    elif order_notify_enabled and order_notify_user_id:
+        # Антиспам отключен, но заказы включены — запускаем Long Poll только для заказов
+        add_log("[ORDER] Antispam disabled, but order notifications enabled. Starting Long Poll for orders only...")
+        threading.Thread(
+            target=vk_antispam_worker,
+            args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, 0, 1, tg_token, tg_chat_id, False,
+                  order_notify_enabled, order_notify_user_id),
+            daemon=True
+        ).start()
     else:
         add_log("⚠️ Антиспам отключен в настройках.")
 
@@ -3920,9 +4075,10 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         hours = int(params.get("hours", 24)) if mode == "date" else None
         sent_ids = load_sent_ids()
         add_log("🚀 Парсер готов к работе.")
+        add_log(f"🕐 Время проверяется по МСК (UTC+3)")
         while not stop_event_obj.is_set():
-            now = datetime.datetime.now()
-            add_log(f"⏰ Сейчас {now.strftime('%H:%M:%S')}, рабочий диапазон: {start_time_str} - {end_time_str}")
+            now = datetime.datetime.now(MSK_TZ)
+            add_log(f"⏰ Сейчас {now.strftime('%H:%M:%S')} МСК, рабочий диапазон: {start_time_str} - {end_time_str}")
             try:
                 start_h, start_m = map(int, start_time_str.split(":"))
                 end_h, end_m = map(int, end_time_str.split(":"))
@@ -3941,7 +4097,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                 add_log(f"❗ Неизвестная ошибка при обработке временного диапазона: {e}. Завершение работы парсера.")
                 break
             if not (start_dt <= now <= end_dt):
-                add_log("⌛ Вне заданного рабочего диапазона времени. Ожидание 1 минуты перед повторной проверкой...")
+                add_log("⌛ Вне рабочего диапазона (МСК). Ожидание 1 минуты...")
                 for _ in range(60):
                     if stop_event_obj.is_set():
                         add_log("⛔ Парсер остановлен во время ожидания по времени.")
@@ -4084,13 +4240,14 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         add_log(f"💥 Критическая ошибка в потоке парсера:\n{tb}")
     finally:
         add_log("🤖 bot_worker завершил работу.")
-        main_root = tk._default_root
-        if main_root and main_root.winfo_exists():
-            try:
-                start_btn_ref.config(state=tk.NORMAL)
-                stop_btn_ref.config(state=tk.DISABLED)
-            except Exception as e:
-                add_log(f"Ошибка при сбросе состояния кнопок GUI: {e}")
+        if start_btn_ref and stop_btn_ref and HAS_TKINTER:
+            main_root = tk._default_root
+            if main_root and main_root.winfo_exists():
+                try:
+                    start_btn_ref.config(state=tk.NORMAL)
+                    stop_btn_ref.config(state=tk.DISABLED)
+                except Exception as e:
+                    add_log(f"Ошибка при сбросе состояния кнопок GUI: {e}")
 
 def start_bot(params, start_btn_ref, stop_btn_ref, use_telegram_flag):
     global stop_event
