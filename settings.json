@@ -16,7 +16,7 @@
         "https://vk.com/newandsales"
     ],
     "start_time": "06:00",
-    "end_time": "23:00",
+    "end_time": "11:15",
     "freq": 360,
     "price_percent": 50.0,
     "price_delta": 200,
@@ -31,3 +31,4 @@
     "order_notify_enabled": true,
     "order_notify_vk_id": "irina_mod"
 }
+
