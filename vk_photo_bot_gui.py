@@ -4076,27 +4076,27 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         sent_ids = load_sent_ids()
         add_log("🚀 Парсер готов к работе.")
         add_log(f"🕐 Время проверяется по МСК (UTC+3)")
+        def _is_in_schedule():
+            """Check if current MSK time is within working hours."""
+            now_check = datetime.datetime.now(MSK_TZ)
+            try:
+                s_h, s_m = map(int, start_time_str.split(":"))
+                e_h, e_m = map(int, end_time_str.split(":"))
+                s_dt = now_check.replace(hour=s_h, minute=s_m, second=0, microsecond=0)
+                e_dt = now_check.replace(hour=e_h, minute=e_m, second=0, microsecond=0)
+                if e_dt < s_dt:
+                    if now_check >= s_dt:
+                        e_dt += datetime.timedelta(days=1)
+                    else:
+                        s_dt -= datetime.timedelta(days=1)
+                return s_dt <= now_check <= e_dt
+            except Exception:
+                return True
+
         while not stop_event_obj.is_set():
             now = datetime.datetime.now(MSK_TZ)
             add_log(f"⏰ Сейчас {now.strftime('%H:%M:%S')} МСК, рабочий диапазон: {start_time_str} - {end_time_str}")
-            try:
-                start_h, start_m = map(int, start_time_str.split(":"))
-                end_h, end_m = map(int, end_time_str.split(":"))
-                start_dt = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-                end_dt = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
-                if end_dt < start_dt:
-                    # если диапазон "через полночь"
-                    if now >= start_dt:
-                        end_dt += datetime.timedelta(days=1)
-                    else:
-                        start_dt -= datetime.timedelta(days=1)
-            except ValueError:
-                add_log("❗ Ошибка: Некорректный формат времени (HH:MM). Завершение работы парсера.")
-                break
-            except Exception as e:
-                add_log(f"❗ Неизвестная ошибка при обработке временного диапазона: {e}. Завершение работы парсера.")
-                break
-            if not (start_dt <= now <= end_dt):
+            if not _is_in_schedule():
                 add_log("⌛ Вне рабочего диапазона (МСК). Ожидание 1 минуты...")
                 for _ in range(60):
                     if stop_event_obj.is_set():
@@ -4107,6 +4107,9 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
             for src_url in sources:
                 if stop_event_obj.is_set():
                     add_log("⛔ Парсер остановлен (в цикле источников).")
+                    break
+                if not _is_in_schedule():
+                    add_log("⌛ Рабочее время закончилось. Остановка обработки источников.")
                     break
                 add_log(f"🔍 Обработка источника: {src_url}")
                 owner_id = get_owner_id_from_url(src_url, vk_token)
@@ -4126,6 +4129,9 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                 for post in posts:
                     if stop_event_obj.is_set():
                         add_log("⛔ Парсер остановлен (в цикле обработки постов).")
+                        break
+                    if not _is_in_schedule():
+                        add_log("⌛ Рабочее время закончилось. Остановка обработки постов.")
                         break
                     post_id_val = post.get("id")
                     post_owner_id_val = post.get("owner_id")
