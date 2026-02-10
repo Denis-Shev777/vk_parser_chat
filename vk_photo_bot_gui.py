@@ -396,11 +396,26 @@ def send_order_notification_vk(vk_token, admin_user_id, from_id, message_text, p
     """
     try:
         chat_number = peer_id - 2000000000
+
+        # Получаем имя пользователя
+        user_name = f"id{from_id}"
+        try:
+            resp = requests.get(
+                "https://api.vk.com/method/users.get",
+                params={"user_ids": from_id, "v": VK_API_VERSION, "access_token": vk_token},
+                timeout=10
+            ).json()
+            if "response" in resp and resp["response"]:
+                u = resp["response"][0]
+                user_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+        except Exception:
+            pass
+
         notification = (
-            f"New order in chat!\n\n"
-            f"From: https://vk.com/id{from_id}\n"
-            f"Message: {message_text[:500]}\n\n"
-            f"Go to chat: https://vk.com/im?sel=c{chat_number}"
+            f"Новый заказ в чате!\n\n"
+            f"От: {user_name} (https://vk.com/id{from_id})\n\n"
+            f"Сообщение:\n{message_text[:800]}\n\n"
+            f"Перейти в чат: https://vk.com/im?sel=c{chat_number}"
         )
         send_vk_message(vk_token, admin_user_id, notification)
         add_log(f"[ORDER] Notification sent to admin (user_id={admin_user_id})")
@@ -3681,7 +3696,7 @@ def vk_antispam_worker(
                 "key": key,
                 "ts": ts,
                 "wait": 25,
-                "mode": 2,
+                "mode": 10,
                 "version": 3
             }
             
