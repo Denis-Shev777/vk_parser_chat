@@ -29,5 +29,6 @@
     "count": null,
     "hours": 24,
     "order_notify_enabled": true,
-    "order_notify_vk_id": "irina_mod"
+    "order_notify_vk_id": "irina_mod",
+    "order_chat_link": "https://vk.com/im/convo/2000000184"
 }

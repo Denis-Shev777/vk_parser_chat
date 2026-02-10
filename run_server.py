@@ -109,6 +109,7 @@ def main():
         "antispam_notify_telegram": settings.get("antispam_notify_telegram", True),
         "order_notify_enabled": settings.get("order_notify_enabled", False),
         "order_notify_vk_id": settings.get("order_notify_vk_id", ""),
+        "order_chat_link": settings.get("order_chat_link", ""),
     }
 
     now_msk = datetime.datetime.now(MSK_TZ)
