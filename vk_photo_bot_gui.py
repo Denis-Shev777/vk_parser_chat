@@ -592,6 +592,54 @@ def is_gibberish(text):
     # Если меньше 20% гласных - возможно gibberish
     return (vowel_count / len(letters)) < 0.2
 
+def has_hidden_messenger_contact(text):
+    """Проверяет на замаскированные контакты мессенджеров (tg, телеграм, whatsapp и т.п.)"""
+    if not text:
+        return False
+    t = text.lower()
+    # Нормализуем: убираем лишние пробелы между символами для детекции "t  г" -> "tг"
+    t_collapsed = re.sub(r'\s+', '', t)
+    # Паттерны Telegram
+    tg_patterns = [
+        r't\s*[гg]\s*[:：.]\s*\S+',       # t г: username / tg: username
+        r'тг\s*[:：.]\s*\S+',              # тг: username
+        r'телеграм[мм]?\s*[:：.]\s*\S+',   # телеграм: username
+        r'telegram\s*[:：.]\s*\S+',         # telegram: username
+        r'@[a-zA-Z0-9_]{3,}',              # @username
+        r't\.me/\S+',                       # t.me/username
+    ]
+    # Паттерны WhatsApp / Viber / других мессенджеров
+    messenger_patterns = [
+        r'whats\s*app\s*[:：.]\s*\S+',
+        r'вотс\s*ап\s*[:：.]\s*\S+',
+        r'вайбер\s*[:：.]\s*\S+',
+        r'viber\s*[:：.]\s*\S+',
+        r'ватсап\s*[:：.]\s*\S+',
+        r'wh?ats?\s*app',
+    ]
+    all_patterns = tg_patterns + messenger_patterns
+    for pat in all_patterns:
+        if re.search(pat, t, re.IGNORECASE):
+            return True
+        if re.search(pat, t_collapsed, re.IGNORECASE):
+            return True
+    # Проверка ключевых фраз рекламного спама
+    spam_phrases = [
+        'копируй и вставляй',
+        'пиши в лс',
+        'пишите в лс',
+        'пиши в личку',
+        'пишите в личку',
+        'удостоверение',
+        'внесение в базу',
+        'права категори',
+    ]
+    for phrase in spam_phrases:
+        if phrase in t:
+            return True
+    return False
+
+
 def check_spam_patterns(text, antiwords=None):
     """
     Проверяет текст на спам-паттерны и возвращает информацию о подозрительности
@@ -604,6 +652,7 @@ def check_spam_patterns(text, antiwords=None):
     details = {
         'has_links': False,
         'has_phone': False,
+        'has_messenger_contact': False,
         'emoji_count': 0,
         'mention_count': 0,
         'is_caps': False,
@@ -627,6 +676,11 @@ def check_spam_patterns(text, antiwords=None):
     if has_links(text):
         details['has_links'] = True
         reasons.append("содержит ссылку")
+
+    # Проверка скрытых контактов мессенджеров (tg:, телеграм:, whatsapp и т.п.)
+    if has_hidden_messenger_contact(text):
+        details['has_messenger_contact'] = True
+        reasons.append("контакт мессенджера / рекламный спам")
 
     # Проверка телефонов
     if has_phone(text):
@@ -668,6 +722,9 @@ def check_spam_patterns(text, antiwords=None):
     if details['has_antiwords']:
         is_spam = True
         reason = "критично: " + ", ".join(reasons)
+    elif details.get('has_messenger_contact'):
+        is_spam = True
+        reason = "критично: контакт мессенджера / рекламный спам"
     elif details['has_phone'] and details['has_links']:
         is_spam = True
         reason = "критично: телефон + ссылка"
@@ -3751,6 +3808,13 @@ def vk_antispam_worker(
                                     spam_details = pattern_details
                                     add_log(f"🚫 Ссылка от не-админа! user_id={from_id}")
 
+                                # 1.5. Скрытый контакт мессенджера (tg:, телеграм:, whatsapp и т.п.)
+                                elif pattern_details.get('has_messenger_contact'):
+                                    is_spam_detected = True
+                                    spam_reason = "контакт мессенджера / рекламный спам"
+                                    spam_details = pattern_details
+                                    add_log(f"🚫 Контакт мессенджера! user_id={from_id}")
+
                                 # 2. Номер телефона
                                 elif pattern_details.get('has_phone'):
                                     is_spam_detected = True
@@ -3866,6 +3930,12 @@ def vk_antispam_worker(
                                 spam_reason = "ссылка в отредактированном сообщении"
                                 spam_details = pattern_details
                                 add_log(f"🚫 Ссылка в редакции! user_id={from_id}")
+
+                            elif pattern_details.get('has_messenger_contact'):
+                                is_spam_detected = True
+                                spam_reason = "контакт мессенджера в редакции"
+                                spam_details = pattern_details
+                                add_log(f"🚫 Контакт мессенджера в редакции! user_id={from_id}")
 
                             elif pattern_details.get('has_phone'):
                                 is_spam_detected = True
