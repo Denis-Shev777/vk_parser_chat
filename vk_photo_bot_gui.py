@@ -415,7 +415,7 @@ def send_order_notification_vk(vk_token, admin_user_id, from_id, message_text, p
             f"Новый заказ в чате!\n\n"
             f"От: {user_name} (https://vk.com/id{from_id})\n\n"
             f"Сообщение:\n{message_text[:800]}\n\n"
-            f"Перейти в чат: https://vk.com/im?sel=c{chat_number}"
+            f"Перейти в чат: https://vk.com/im/convo/{peer_id}"
         )
         send_vk_message(vk_token, admin_user_id, notification)
         add_log(f"[ORDER] Notification sent to admin (user_id={admin_user_id})")
