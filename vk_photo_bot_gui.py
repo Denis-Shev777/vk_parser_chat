@@ -390,18 +390,32 @@ def check_order_keywords(text):
             return True, keyword
     return False, None
 
-def send_order_notification_vk(vk_token, admin_user_id, from_id, message_text, peer_id):
+def send_order_notification_vk(vk_token, admin_user_id, from_id, message_text, peer_id, chat_link=""):
     """
     Отправляет уведомление о заказе администратору в личные сообщения VK.
     """
     try:
-        chat_number = peer_id - 2000000000
+        # Получаем имя пользователя
+        user_name = f"id{from_id}"
+        try:
+            resp = requests.get(
+                "https://api.vk.com/method/users.get",
+                params={"user_ids": from_id, "v": VK_API_VERSION, "access_token": vk_token},
+                timeout=10
+            ).json()
+            if "response" in resp and resp["response"]:
+                u = resp["response"][0]
+                user_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+        except Exception:
+            pass
+
         notification = (
-            f"New order in chat!\n\n"
-            f"From: https://vk.com/id{from_id}\n"
-            f"Message: {message_text[:500]}\n\n"
-            f"Go to chat: https://vk.com/im?sel=c{chat_number}"
+            f"Новый заказ в чате!\n\n"
+            f"От: {user_name} (https://vk.com/id{from_id})\n\n"
+            f"Сообщение:\n{message_text[:800]}"
         )
+        if chat_link:
+            notification += f"\n\nПерейти в чат: {chat_link}"
         send_vk_message(vk_token, admin_user_id, notification)
         add_log(f"[ORDER] Notification sent to admin (user_id={admin_user_id})")
         return True
@@ -3619,7 +3633,8 @@ def vk_antispam_worker(
     tg_chat_id: int = None,
     notify_telegram: bool = True,
     order_notify_enabled: bool = False,
-    order_notify_user_id: int = None
+    order_notify_user_id: int = None,
+    order_chat_link: str = ""
 ):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с Long Poll - видит ВСЕ события в реальном времени!
@@ -3681,7 +3696,7 @@ def vk_antispam_worker(
                 "key": key,
                 "ts": ts,
                 "wait": 25,
-                "mode": 2,
+                "mode": 10,
                 "version": 3
             }
             
@@ -3899,7 +3914,7 @@ def vk_antispam_worker(
                                         is_order, matched_keyword = check_order_keywords(text)
                                         if is_order:
                                             add_log(f"[ORDER] Detected from user_id={from_id}, keyword='{matched_keyword}', text: {text[:100]}...")
-                                            send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id)
+                                            send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id, order_chat_link)
 
                     # Тип события 5 = редактирование сообщения
                     elif update[0] == 5:
@@ -4072,6 +4087,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
     # --- уведомления о заказах ---
     order_notify_enabled = params.get("order_notify_enabled", False)
     order_notify_vk_id_raw = params.get("order_notify_vk_id", "")
+    order_chat_link = params.get("order_chat_link", "")
     order_notify_user_id = None
 
     if order_notify_enabled and order_notify_vk_id_raw:
@@ -4105,7 +4121,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         threading.Thread(
             target=vk_antispam_worker,
             args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram,
-                  order_notify_enabled, order_notify_user_id),
+                  order_notify_enabled, order_notify_user_id, order_chat_link),
             daemon=True
         ).start()
         notify_status = "с уведомлениями в Telegram" if (notify_telegram and tg_token and tg_chat_id) else "без уведомлений"
@@ -4117,7 +4133,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         threading.Thread(
             target=vk_antispam_worker,
             args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, 0, 1, tg_token, tg_chat_id, False,
-                  order_notify_enabled, order_notify_user_id),
+                  order_notify_enabled, order_notify_user_id, order_chat_link),
             daemon=True
         ).start()
     else:
