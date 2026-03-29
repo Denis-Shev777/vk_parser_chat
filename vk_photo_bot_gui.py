@@ -3622,6 +3622,43 @@ def vk_kick_user(vk_token: str, vk_chat_id: int, user_id: int, reason: str = "")
         return False
 
 
+def check_vk_profile_risk(vk_token, user_id):
+    """
+    Проверяет профиль VK пользователя на признаки спам-аккаунта.
+    Возвращает (is_risky: bool, reasons: list[str])
+    Вызывается один раз при входе пользователя в чат.
+    """
+    try:
+        resp = vk_api_call(
+            "users.get",
+            vk_token,
+            {"user_ids": user_id, "fields": "photo_id,followers_count"},
+            timeout=5
+        )
+        if not resp or not isinstance(resp, list) or not resp:
+            return False, []
+
+        user = resp[0]
+        reasons = []
+
+        # Нет фото профиля (дефолтная аватарка)
+        if not user.get("photo_id"):
+            reasons.append("нет фото профиля")
+
+        # Мало подписчиков (менее 5)
+        followers = user.get("followers_count", 0)
+        if followers < 5:
+            reasons.append(f"мало подписчиков ({followers})")
+
+        # Считаем рискованным если 2+ признака
+        is_risky = len(reasons) >= 2
+        return is_risky, reasons
+
+    except Exception as e:
+        add_log(f"⚠️ Профиль user_id={user_id} не проверен: {e}")
+        return False, []
+
+
 def vk_antispam_worker(
     vk_token: str,
     vk_peer_id: int,
@@ -3650,6 +3687,8 @@ def vk_antispam_worker(
     
     # Словарь: user_id -> timestamp входа
     join_ts = {}
+    # Словарь: user_id -> (is_risky, reasons) — результат проверки профиля при входе
+    user_risk = {}
     
     # Получаем Long Poll сервер
     server = None
@@ -3738,10 +3777,20 @@ def vk_antispam_worker(
                                 if invited_user > 0:
                                     join_ts[invited_user] = current_time
                                     add_log(f"👤 Антиспам: вход user_id={invited_user}")
-                                    
+
+                                    # Проверяем профиль нового пользователя (один запрос)
+                                    is_risky, risk_reasons = check_vk_profile_risk(vk_token, invited_user)
+                                    user_risk[invited_user] = (is_risky, risk_reasons)
+                                    if is_risky:
+                                        add_log(f"⚠️ Рискованный профиль user_id={invited_user}: {', '.join(risk_reasons)}")
+                                    else:
+                                        detail = f" ({', '.join(risk_reasons)})" if risk_reasons else ""
+                                        add_log(f"✅ Профиль ОК user_id={invited_user}{detail}")
+
                                     # Очистка старых записей (старше window_sec)
                                     cutoff = current_time - window_sec
                                     join_ts = {uid: jt for uid, jt in join_ts.items() if jt > cutoff}
+                                    user_risk = {uid: v for uid, v in user_risk.items() if uid in join_ts}
 
                         # === ПРОВЕРКА "ТОЛЬКО КАРТИНКА" ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ ===
                         # Кикаем новых пользователей, которые отправляют картинки без текста
@@ -3801,9 +3850,61 @@ def vk_antispam_worker(
 
                                         # Удаляем из отслеживания (чтобы не кикать повторно)
                                         join_ts.pop(from_id, None)
+                                        user_risk.pop(from_id, None)
 
                                         # Переходим к следующему событию (не проверяем текст)
                                         continue
+
+                                    # === РЕПОСТ (WALL) ОТ НОВОГО ПОЛЬЗОВАТЕЛЯ ===
+                                    # Старых участников не трогаем — они делают репосты для заказов
+                                    has_wall_repost = any(
+                                        extra.get(k) == "wall"
+                                        for k in extra.keys()
+                                        if k.startswith("attach") and k.endswith("_type")
+                                    )
+                                    if has_wall_repost:
+                                        # Проверяем: может это заказ? (текст содержит ключевые слова)
+                                        is_order_msg, _ = check_order_keywords(text) if text else (False, None)
+                                        if not is_order_msg:
+                                            add_log(f"🚫 Репост (wall) от нового пользователя! user_id={from_id}, {int(time_since_join)} сек после входа")
+
+                                            risk_is_risky, risk_reasons = user_risk.get(from_id, (False, []))
+                                            spam_reason = "репост со своей страницы (новый пользователь)"
+                                            if risk_reasons:
+                                                spam_reason += f" | профиль: {', '.join(risk_reasons)}"
+
+                                            spam_details = {
+                                                'has_wall_repost': True,
+                                                'text_length': len(text) if text else 0,
+                                                'time_since_join': int(time_since_join),
+                                                'profile_risky': risk_is_risky,
+                                                'profile_reasons': risk_reasons
+                                            }
+
+                                            log_spam_to_file(from_id, text or "[репост без текста]", spam_reason, spam_details)
+
+                                            if notify_telegram and tg_token and tg_chat_id:
+                                                send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text or "[репост]")
+
+                                            try:
+                                                vk_api_call(
+                                                    "messages.delete",
+                                                    vk_token,
+                                                    {
+                                                        "peer_id": peer_id,
+                                                        "delete_for_all": 1,
+                                                        "message_ids": message_id
+                                                    },
+                                                    timeout=5
+                                                )
+                                                add_log(f"🗑️ Репост удалён")
+                                            except Exception as e:
+                                                add_log(f"❌ Ошибка удаления репоста: {e}")
+
+                                            vk_kick_user(vk_token, vk_chat_id, from_id, reason=spam_reason)
+                                            join_ts.pop(from_id, None)
+                                            user_risk.pop(from_id, None)
+                                            continue
 
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
                         if from_id > 0 and text:
