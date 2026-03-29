@@ -3627,7 +3627,7 @@ def vk_antispam_worker(
     vk_peer_id: int,
     vk_chat_id: int,
     stop_event_obj,
-    window_sec: int = 60,
+    window_sec: int = 3600,
     poll_sec: int = 3,
     tg_token: str = None,
     tg_chat_id: int = None,
@@ -3739,8 +3739,8 @@ def vk_antispam_worker(
                                     join_ts[invited_user] = current_time
                                     add_log(f"👤 Антиспам: вход user_id={invited_user}")
                                     
-                                    # Очистка старых записей (старше 5 минут)
-                                    cutoff = current_time - 300
+                                    # Очистка старых записей (старше window_sec)
+                                    cutoff = current_time - window_sec
                                     join_ts = {uid: jt for uid, jt in join_ts.items() if jt > cutoff}
 
                         # === ПРОВЕРКА "ТОЛЬКО КАРТИНКА" ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ ===
@@ -4082,7 +4082,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
     add_log("🤖 bot_worker стартовал!")
     # --- антиспам для VK беседы (кик, если написал в первые N сек после входа) ---
     antispam_enabled = params.get("antispam_enabled", True)
-    antispam_window_sec = params.get("antispam_window_sec", 300)
+    antispam_window_sec = params.get("antispam_window_sec", 3600)
 
     # --- уведомления о заказах ---
     order_notify_enabled = params.get("order_notify_enabled", False)
@@ -4535,7 +4535,7 @@ def main():
     row_idx += 1
     tk.Label(main_settings_frame, text="Окно антиспама (сек):", font=MED_FONT, bg=BG_FRAME).grid(row=row_idx, column=0, sticky="w", pady=3, padx=(10,0))
     antispam_window_entry = tk.Entry(main_settings_frame, width=10, font=MED_FONT, bg="white", relief="groove", bd=1)
-    antispam_window_entry.insert(0, str(settings.get("antispam_window_sec", 300)))
+    antispam_window_entry.insert(0, str(settings.get("antispam_window_sec", 3600)))
     antispam_window_entry.grid(row=row_idx, column=1, sticky="w", pady=3, padx=(0,10))
     add_super_paste(antispam_window_entry)
 
