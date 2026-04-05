@@ -105,7 +105,7 @@ def main():
         "count": settings.get("count", None),
         "hours": settings.get("hours", 24),
         "antispam_enabled": settings.get("antispam_enabled", True),
-        "antispam_window_sec": settings.get("antispam_window_sec", 300),
+        "antispam_window_sec": settings.get("antispam_window_sec", 86400),
         "antispam_notify_telegram": settings.get("antispam_notify_telegram", True),
         "order_notify_enabled": settings.get("order_notify_enabled", False),
         "order_notify_vk_id": settings.get("order_notify_vk_id", ""),
