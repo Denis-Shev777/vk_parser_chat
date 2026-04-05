@@ -3891,56 +3891,48 @@ def vk_antispam_worker(
                                         if k.startswith("attach") and k.endswith("_type")
                                     )
                                     if has_wall_repost:
-                                        # Проверяем: может это заказ? (текст содержит ключевые слова)
-                                        is_order_msg, _ = check_order_keywords(text) if text else (False, None)
-                                        if not is_order_msg:
-                                            risk_is_risky, risk_reasons = user_risk.get(from_id, (False, []))
-                                            add_log(f"⚠️ Репост (wall) от нового пользователя! user_id={from_id}, {int(time_since_join)} сек после входа, профиль_риск={risk_is_risky}")
+                                        # Текст заказа слишком разнообразен (город, размер, "1 шт" и т.п.),
+                                        # поэтому единственный надёжный критерий — профиль пользователя.
+                                        risk_is_risky, risk_reasons = user_risk.get(from_id, (False, []))
+                                        add_log(f"⚠️ Репост (wall) от нового пользователя! user_id={from_id}, {int(time_since_join)} сек после входа, профиль_риск={risk_is_risky}")
 
-                                            spam_reason = "репост со своей страницы (новый пользователь)"
-                                            if risk_reasons:
-                                                spam_reason += f" | профиль: {', '.join(risk_reasons)}"
+                                        spam_reason = "репост со своей страницы (новый пользователь)"
+                                        if risk_reasons:
+                                            spam_reason += f" | профиль: {', '.join(risk_reasons)}"
 
+                                        if risk_is_risky:
+                                            # Рискованный профиль (нет фото + мало подписчиков) — автокик
+                                            add_log(f"🚫 Автокик: рискованный профиль + репост. user_id={from_id}")
                                             spam_details = {
                                                 'has_wall_repost': True,
                                                 'text_length': len(text) if text else 0,
                                                 'time_since_join': int(time_since_join),
-                                                'profile_risky': risk_is_risky,
+                                                'profile_risky': True,
                                                 'profile_reasons': risk_reasons
                                             }
-
-                                            if risk_is_risky:
-                                                # Рискованный профиль (нет фото + мало подписчиков) — автокик
-                                                add_log(f"🚫 Автокик: рискованный профиль + репост. user_id={from_id}")
-                                                log_spam_to_file(from_id, text or "[репост без текста]", spam_reason, spam_details)
-                                                if notify_telegram and tg_token and tg_chat_id:
-                                                    send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text or "[репост]")
-                                                try:
-                                                    vk_api_call(
-                                                        "messages.delete",
-                                                        vk_token,
-                                                        {
-                                                            "peer_id": peer_id,
-                                                            "delete_for_all": 1,
-                                                            "message_ids": message_id
-                                                        },
-                                                        timeout=5
-                                                    )
-                                                    add_log(f"🗑️ Репост удалён")
-                                                except Exception as e:
-                                                    add_log(f"❌ Ошибка удаления репоста: {e}")
-                                                vk_kick_user(vk_token, vk_chat_id, from_id, reason=spam_reason)
-                                                join_ts.pop(from_id, None)
-                                                user_risk.pop(from_id, None)
-                                                save_join_ts(join_ts)
-                                                continue
-                                            else:
-                                                # Профиль выглядит нормально — только алерт, не кикаем
-                                                # Сообщение остаётся, заказ может пройти дальше
-                                                add_log(f"👀 Репост от нового участника с обычным профилем — алерт без кика. user_id={from_id}")
-                                                if notify_telegram and tg_token and tg_chat_id:
-                                                    alert_reason = f"⚠️ ПРОВЕРЬТЕ ВРУЧНУЮ: {spam_reason}"
-                                                    send_spam_alert_telegram(tg_token, tg_chat_id, from_id, alert_reason, text or "[репост]")
+                                            log_spam_to_file(from_id, text or "[репост без текста]", spam_reason, spam_details)
+                                            if notify_telegram and tg_token and tg_chat_id:
+                                                send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text or "[репост]")
+                                            try:
+                                                vk_api_call(
+                                                    "messages.delete",
+                                                    vk_token,
+                                                    {
+                                                        "peer_id": peer_id,
+                                                        "delete_for_all": 1,
+                                                        "message_ids": message_id
+                                                    },
+                                                    timeout=5
+                                                )
+                                                add_log(f"🗑️ Репост удалён")
+                                            except Exception as e:
+                                                add_log(f"❌ Ошибка удаления репоста: {e}")
+                                            vk_kick_user(vk_token, vk_chat_id, from_id, reason=spam_reason)
+                                            join_ts.pop(from_id, None)
+                                            user_risk.pop(from_id, None)
+                                            save_join_ts(join_ts)
+                                            continue
+                                        # Нормальный профиль — скорее всего покупатель, пропускаем
 
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
                         if from_id > 0 and text:
