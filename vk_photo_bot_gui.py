@@ -3650,8 +3650,8 @@ def check_vk_profile_risk(vk_token, user_id):
         if followers < 5:
             reasons.append(f"мало подписчиков ({followers})")
 
-        # Считаем рискованным если 2+ признака
-        is_risky = len(reasons) >= 2
+        # Считаем рискованным если хотя бы 1 признак
+        is_risky = len(reasons) >= 1
         return is_risky, reasons
 
     except Exception as e:
@@ -3893,8 +3893,13 @@ def vk_antispam_worker(
                                     if has_wall_repost:
                                         # Текст заказа слишком разнообразен (город, размер, "1 шт" и т.п.),
                                         # поэтому единственный надёжный критерий — профиль пользователя.
-                                        risk_is_risky, risk_reasons = user_risk.get(from_id, (False, []))
-                                        add_log(f"⚠️ Репост (wall) от нового пользователя! user_id={from_id}, {int(time_since_join)} сек после входа, профиль_риск={risk_is_risky}")
+                                        # Если профиль не закеширован (рестарт бота) — запрашиваем его сейчас
+                                        if from_id not in user_risk:
+                                            add_log(f"🔍 Профиль user_id={from_id} не в кеше, запрашиваю...")
+                                            is_r, r_reasons = check_vk_profile_risk(vk_token, from_id)
+                                            user_risk[from_id] = (is_r, r_reasons)
+                                        risk_is_risky, risk_reasons = user_risk[from_id]
+                                        add_log(f"⚠️ Репост (wall) от нового пользователя! user_id={from_id}, {int(time_since_join)} сек после входа, профиль_риск={risk_is_risky}, признаки={risk_reasons}")
 
                                         spam_reason = "репост со своей страницы (новый пользователь)"
                                         if risk_reasons:
