@@ -5,12 +5,12 @@
 Использование:
     python3 update_token.py
 
-Инструкция по получению токена:
-    1. Откройте в браузере: https://vkhost.github.io/
-    2. Нажмите кнопку "VK Admin"
-    3. На странице VK нажмите "Разрешить"
-    4. Скопируйте адресную строку браузера (URL начнётся с https://oauth.vk.com/...)
-    5. Вставьте скопированный URL в это поле
+Инструкция по получению токена (через Kate Mobile):
+    1. Скопируйте ссылку ниже и откройте её в браузере:
+       https://oauth.vk.com/authorize?client_id=2685278&scope=messages,offline&redirect_uri=https://oauth.vk.com/blank.html&display=page&response_type=token
+    2. Войдите в VK и нажмите "Разрешить"
+    3. Скопируйте адресную строку браузера (URL содержит access_token=...)
+    4. Вставьте скопированный URL в это поле
 """
 import re
 import json
@@ -18,6 +18,15 @@ import os
 import sys
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+OAUTH_URL = (
+    "https://oauth.vk.com/authorize"
+    "?client_id=2685278"
+    "&scope=messages,offline"
+    "&redirect_uri=https://oauth.vk.com/blank.html"
+    "&display=page"
+    "&response_type=token"
+)
 
 
 def extract_token(url: str):
@@ -32,10 +41,16 @@ def main():
     print("Обновление VK токена")
     print("=" * 60)
     print()
+    print("ВНИМАНИЕ: VK Admin приложение закрыто с 13 апреля.")
+    print("Используем Kate Mobile для получения токена.")
+    print()
     print("Инструкция:")
-    print("  1. Откройте в браузере: https://vkhost.github.io/")
-    print("  2. Нажмите кнопку 'VK Admin'")
-    print("  3. На странице VK нажмите 'Разрешить'")
+    print("  1. Откройте в браузере эту ссылку:")
+    print()
+    print(f"     {OAUTH_URL}")
+    print()
+    print("  2. Войдите в VK под нужным аккаунтом")
+    print("  3. Нажмите 'Разрешить'")
     print("  4. Скопируйте адресную строку браузера")
     print("  5. Вставьте URL ниже")
     print()
@@ -77,7 +92,7 @@ def main():
     print(f"Старый токен: {old_preview}")
     print(f"Новый токен:  {new_preview}")
     print()
-    print("✅ Токен успешно обновлён в settings.json")
+    print("Токен успешно обновлён в settings.json")
     print("Перезапустите run_server.py для применения изменений.")
 
 
