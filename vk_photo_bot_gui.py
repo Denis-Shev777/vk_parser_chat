@@ -650,11 +650,51 @@ def has_hidden_messenger_contact(text):
         'удостоверение',
         'внесение в базу',
         'права категори',
+        # Типовые фразы мошенников/рекламщиков услуг
+        'деньги первые не берем',
+        'деньги не берем',
+        'предоплату не берем',
+        'предоплата не',
+        'оплата после',
+        'под ключ',
+        'огромные связи',
+        'есть связи',
+        'все официально делаем',
+        'сделаем за',
+        'много кейсов',
+        'без предоплаты',
     ]
     for phrase in spam_phrases:
         if phrase in t:
             return True
     return False
+
+
+def extract_fwd_text(vk_token, message_id):
+    """Fetches full message via API and extracts text from forwarded messages."""
+    try:
+        resp = vk_api_call(
+            "messages.getById",
+            vk_token,
+            {"message_ids": message_id},
+            timeout=5
+        )
+        if not resp or not isinstance(resp, dict):
+            return ""
+        items = resp.get("items", [])
+        if not items:
+            return ""
+        msg = items[0]
+        parts = []
+        if msg.get("text"):
+            parts.append(msg["text"])
+        for fwd in msg.get("fwd_messages", []):
+            fwd_text = fwd.get("text", "")
+            if fwd_text:
+                parts.append(fwd_text)
+        return " ".join(parts)
+    except Exception:
+        return ""
 
 
 def check_spam_patterns(text, antiwords=None):
@@ -3940,7 +3980,15 @@ def vk_antispam_worker(
                                         # Нормальный профиль — скорее всего покупатель, пропускаем
 
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
-                        if from_id > 0 and text:
+                        # Для новых пользователей также проверяем текст пересланных сообщений
+                        effective_text = text
+                        if from_id > 0 and not text and from_id in join_ts and not is_admin(from_id):
+                            fwd_text = extract_fwd_text(vk_token, message_id)
+                            if fwd_text:
+                                effective_text = fwd_text
+                                add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю на спам")
+
+                        if from_id > 0 and effective_text:
                             # Админы могут писать всё что угодно - пропускаем проверку
                             if not is_admin(from_id):
                                 is_spam_detected = False
@@ -3948,7 +3996,7 @@ def vk_antispam_worker(
                                 spam_details = {}
 
                                 # Проверяем паттерны спама
-                                is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
+                                is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(effective_text, ANTIWORDS)
 
                                 # СТРОГАЯ ПОЛИТИКА: ЛЮБОЙ признак спама = кик
                                 # Проверяем критичные признаки по отдельности
@@ -4006,14 +4054,14 @@ def vk_antispam_worker(
                                 if is_spam_detected:
                                     add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
                                     add_log(f"   Причина: {spam_reason}")
-                                    add_log(f"   Текст: {text[:80]}...")
+                                    add_log(f"   Текст: {effective_text[:80]}...")
 
                                     # Логируем в файл
-                                    log_spam_to_file(from_id, text, spam_reason, spam_details)
+                                    log_spam_to_file(from_id, effective_text, spam_reason, spam_details)
 
                                     # Отправляем уведомление в Telegram (если включено)
                                     if notify_telegram and tg_token and tg_chat_id:
-                                        send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text)
+                                        send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, effective_text)
 
                                     # Удаляем сообщение
                                     try:
