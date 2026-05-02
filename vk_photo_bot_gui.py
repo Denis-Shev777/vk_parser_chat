@@ -650,11 +650,51 @@ def has_hidden_messenger_contact(text):
         'удостоверение',
         'внесение в базу',
         'права категори',
+        # Типовые фразы мошенников/рекламщиков услуг
+        'деньги первые не берем',
+        'деньги не берем',
+        'предоплату не берем',
+        'предоплата не',
+        'оплата после',
+        'под ключ',
+        'огромные связи',
+        'есть связи',
+        'все официально делаем',
+        'сделаем за',
+        'много кейсов',
+        'без предоплаты',
     ]
     for phrase in spam_phrases:
         if phrase in t:
             return True
     return False
+
+
+def extract_fwd_text(vk_token, message_id):
+    """Fetches full message via API and extracts text from forwarded messages."""
+    try:
+        resp = vk_api_call(
+            "messages.getById",
+            vk_token,
+            {"message_ids": message_id},
+            timeout=5
+        )
+        if not resp or not isinstance(resp, dict):
+            return ""
+        items = resp.get("items", [])
+        if not items:
+            return ""
+        msg = items[0]
+        parts = []
+        if msg.get("text"):
+            parts.append(msg["text"])
+        for fwd in msg.get("fwd_messages", []):
+            fwd_text = fwd.get("text", "")
+            if fwd_text:
+                parts.append(fwd_text)
+        return " ".join(parts)
+    except Exception:
+        return ""
 
 
 def check_spam_patterns(text, antiwords=None):
@@ -3632,7 +3672,7 @@ def check_vk_profile_risk(vk_token, user_id):
         resp = vk_api_call(
             "users.get",
             vk_token,
-            {"user_ids": user_id, "fields": "photo_id,followers_count"},
+            {"user_ids": user_id, "fields": "photo_id,followers_count,counters"},
             timeout=5
         )
         if not resp or not isinstance(resp, list) or not resp:
@@ -3642,13 +3682,20 @@ def check_vk_profile_risk(vk_token, user_id):
         reasons = []
 
         # Нет фото профиля (дефолтная аватарка)
-        if not user.get("photo_id"):
+        no_photo = not user.get("photo_id")
+        if no_photo:
             reasons.append("нет фото профиля")
 
         # Мало подписчиков (менее 5)
         followers = user.get("followers_count", 0)
         if followers < 5:
             reasons.append(f"мало подписчиков ({followers})")
+
+        # Пустая стена (0 постов)
+        wall_posts = user.get("counters", {}).get("posts", None)
+        no_wall = wall_posts is not None and wall_posts == 0
+        if no_wall:
+            reasons.append("пустая стена (0 постов)")
 
         # Считаем рискованным если хотя бы 1 признак
         is_risky = len(reasons) >= 1
@@ -3813,6 +3860,21 @@ def vk_antispam_worker(
                                         detail = f" ({', '.join(risk_reasons)})" if risk_reasons else ""
                                         add_log(f"✅ Профиль ОК user_id={invited_user}{detail}")
 
+                                    # Автокик при входе: нет аватара + пустая стена = явный бот/спамер
+                                    has_no_photo = "нет фото профиля" in risk_reasons
+                                    has_no_wall = "пустая стена (0 постов)" in risk_reasons
+                                    if has_no_photo and has_no_wall and not is_admin(invited_user):
+                                        kick_reason = "нет фото профиля + пустая стена"
+                                        add_log(f"🚫 Автокик при входе: {kick_reason}. user_id={invited_user}")
+                                        log_spam_to_file(invited_user, "[вход в чат]", kick_reason, {"profile_reasons": risk_reasons})
+                                        if notify_telegram and tg_token and tg_chat_id:
+                                            send_spam_alert_telegram(tg_token, tg_chat_id, invited_user, kick_reason, "[пустой профиль при входе]")
+                                        vk_kick_user(vk_token, vk_chat_id, invited_user, reason=kick_reason)
+                                        join_ts.pop(invited_user, None)
+                                        user_risk.pop(invited_user, None)
+                                        save_join_ts(join_ts)
+                                        continue
+
                                     # Очистка старых записей (старше window_sec)
                                     cutoff = current_time - window_sec
                                     join_ts = {uid: jt for uid, jt in join_ts.items() if jt > cutoff}
@@ -3940,7 +4002,15 @@ def vk_antispam_worker(
                                         # Нормальный профиль — скорее всего покупатель, пропускаем
 
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
-                        if from_id > 0 and text:
+                        # Для новых пользователей также проверяем текст пересланных сообщений
+                        effective_text = text
+                        if from_id > 0 and not text and from_id in join_ts and not is_admin(from_id):
+                            fwd_text = extract_fwd_text(vk_token, message_id)
+                            if fwd_text:
+                                effective_text = fwd_text
+                                add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю на спам")
+
+                        if from_id > 0 and effective_text:
                             # Админы могут писать всё что угодно - пропускаем проверку
                             if not is_admin(from_id):
                                 is_spam_detected = False
@@ -3948,7 +4018,7 @@ def vk_antispam_worker(
                                 spam_details = {}
 
                                 # Проверяем паттерны спама
-                                is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(text, ANTIWORDS)
+                                is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(effective_text, ANTIWORDS)
 
                                 # СТРОГАЯ ПОЛИТИКА: ЛЮБОЙ признак спама = кик
                                 # Проверяем критичные признаки по отдельности
@@ -4006,14 +4076,14 @@ def vk_antispam_worker(
                                 if is_spam_detected:
                                     add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
                                     add_log(f"   Причина: {spam_reason}")
-                                    add_log(f"   Текст: {text[:80]}...")
+                                    add_log(f"   Текст: {effective_text[:80]}...")
 
                                     # Логируем в файл
-                                    log_spam_to_file(from_id, text, spam_reason, spam_details)
+                                    log_spam_to_file(from_id, effective_text, spam_reason, spam_details)
 
                                     # Отправляем уведомление в Telegram (если включено)
                                     if notify_telegram and tg_token and tg_chat_id:
-                                        send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, text)
+                                        send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, effective_text)
 
                                     # Удаляем сообщение
                                     try:
