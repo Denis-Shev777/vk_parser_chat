@@ -3746,7 +3746,8 @@ def vk_antispam_worker(
     notify_telegram: bool = True,
     order_notify_enabled: bool = False,
     order_notify_user_id: int = None,
-    order_chat_link: str = ""
+    order_chat_link: str = "",
+    order_notify_vk_id_raw: str = ""
 ):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с Long Poll - видит ВСЕ события в реальном времени!
@@ -3799,6 +3800,16 @@ def vk_antispam_worker(
     add_log(f"🔑 Загрузка whitelist администраторов...")
     admin_ids = resolve_admin_ids(vk_token)
     add_log(f"✅ Админов в whitelist: {len(admin_ids)}")
+
+    # Если order_notify_user_id не был разрешён в bot_worker — пробуем из кэша
+    if order_notify_enabled and order_notify_user_id is None and order_notify_vk_id_raw:
+        cached_id = _admin_id_cache.get(order_notify_vk_id_raw)
+        if cached_id:
+            order_notify_user_id = cached_id
+            add_log(f"[ORDER] ID разрешён из кэша: '{order_notify_vk_id_raw}' -> {order_notify_user_id}")
+        else:
+            add_log(f"[ORDER WARNING] Не удалось разрешить '{order_notify_vk_id_raw}' — уведомления о заказах отключены")
+            order_notify_enabled = False
 
     add_log(f"👂 Антиспам: слушаю чат {vk_peer_id}, окно {window_sec} сек")
     
@@ -4005,26 +4016,39 @@ def vk_antispam_worker(
                                         # Нормальный профиль — скорее всего покупатель, пропускаем
 
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
-                        # Для новых пользователей также проверяем текст пересланных сообщений
+                        # Извлекаем текст пересланных сообщений для ВСЕХ пользователей (не только новых)
                         effective_text = text
-                        if from_id > 0 and not text and from_id in join_ts and not is_admin(from_id):
+                        if from_id > 0 and not text and not is_admin(from_id):
                             fwd_text = extract_fwd_text(vk_token, message_id)
                             if fwd_text:
                                 effective_text = fwd_text
                                 add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю")
 
-                        if from_id > 0 and effective_text and not is_admin(from_id):
+                        if from_id > 0 and not is_admin(from_id):
                             # ШАГ 1: СНАЧАЛА проверяем на заказ — клиентов никогда не кикаем!
                             is_order_msg = False
                             if order_notify_enabled and order_notify_user_id:
-                                is_order_msg, matched_keyword = check_order_keywords(effective_text)
-                                if is_order_msg:
-                                    add_log(f"🛒 [ORDER] Заказ от user_id={from_id}, ключевое слово: '{matched_keyword}'")
-                                    add_log(f"   Текст: {effective_text[:100]}")
-                                    send_order_notification_vk(vk_token, order_notify_user_id, from_id, effective_text, peer_id, order_chat_link)
+                                # 1а: ключевые слова в тексте самого пользователя
+                                if text:
+                                    is_order_msg, matched_keyword = check_order_keywords(text)
+                                    if is_order_msg:
+                                        add_log(f"🛒 [ORDER] Заказ (текст) от user_id={from_id}, слово: '{matched_keyword}'")
+                                        add_log(f"   Текст: {text[:100]}")
+                                        send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id, order_chat_link)
+                                # 1б: переслал пост без текста = почти всегда заказ
+                                if not is_order_msg and not text:
+                                    has_wall_repost_order = any(
+                                        extra.get(k) == "wall"
+                                        for k in extra.keys()
+                                        if k.startswith("attach") and k.endswith("_type")
+                                    )
+                                    if has_wall_repost_order:
+                                        is_order_msg = True
+                                        add_log(f"🛒 [ORDER] Пост переслан от user_id={from_id} без текста — уведомляю")
+                                        send_order_notification_vk(vk_token, order_notify_user_id, from_id, "[Пользователь переслал пост товара без комментария]", peer_id, order_chat_link)
 
-                            # ШАГ 2: Если НЕ заказ — проверяем на спам
-                            if not is_order_msg:
+                            # ШАГ 2: Если НЕ заказ — проверяем на спам (только если есть текст)
+                            if not is_order_msg and effective_text:
                                 is_spam_detected = False
                                 spam_reason = ""
                                 spam_details = {}
@@ -4310,8 +4334,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         if order_notify_user_id:
             add_log(f"[ORDER] Order notifications enabled -> user_id={order_notify_user_id}")
         else:
-            add_log(f"[ORDER WARNING] Cannot resolve VK ID '{order_notify_vk_id_raw}', order notifications disabled")
-            order_notify_enabled = False
+            add_log(f"[ORDER WARNING] Cannot resolve '{order_notify_vk_id_raw}' now — will retry in antispam thread")
 
     if antispam_enabled:
         # Проверяем настройку уведомлений в Telegram
@@ -4320,19 +4343,19 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         threading.Thread(
             target=vk_antispam_worker,
             args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram,
-                  order_notify_enabled, order_notify_user_id, order_chat_link),
+                  order_notify_enabled, order_notify_user_id, order_chat_link, order_notify_vk_id_raw),
             daemon=True
         ).start()
         notify_status = "с уведомлениями в Telegram" if (notify_telegram and tg_token and tg_chat_id) else "без уведомлений"
         order_status = ", заказы -> ЛС" if order_notify_enabled else ""
         add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек, {notify_status}{order_status}).")
-    elif order_notify_enabled and order_notify_user_id:
+    elif order_notify_enabled:
         # Антиспам отключен, но заказы включены — запускаем Long Poll только для заказов
         add_log("[ORDER] Antispam disabled, but order notifications enabled. Starting Long Poll for orders only...")
         threading.Thread(
             target=vk_antispam_worker,
             args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, 0, 1, tg_token, tg_chat_id, False,
-                  order_notify_enabled, order_notify_user_id, order_chat_link),
+                  order_notify_enabled, order_notify_user_id, order_chat_link, order_notify_vk_id_raw),
             daemon=True
         ).start()
     else:
