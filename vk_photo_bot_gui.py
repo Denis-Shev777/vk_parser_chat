@@ -599,16 +599,17 @@ def is_gibberish(text):
     """Проверяет на бессмысленный набор символов"""
     if not text or len(text) < 5:
         return False
-    # Удаляем пробелы и проверяем
+    # Сообщения с ценой/количеством ("122р 2шт", "38р уп", "50р/пар") — не gibberish
+    if re.search(r'\d+\s*(?:р(?:уб)?\.?|₽|шт\.?|уп\.?|пар\.?|кг\.?|гр\.?|мл\.?|л\.?)', text, re.IGNORECASE):
+        return False
     text_clean = text.replace(' ', '').lower()
-    # Если нет гласных в русском или английском - подозрительно
     vowels_ru = set('аеёиоуыэюя')
     vowels_en = set('aeiouy')
     letters = [c for c in text_clean if c.isalpha()]
-    if len(letters) < 3:
+    # Нужно минимум 6 букв для надёжного анализа
+    if len(letters) < 6:
         return False
     vowel_count = sum(1 for c in letters if c in vowels_ru or c in vowels_en)
-    # Если меньше 20% гласных - возможно gibberish
     return (vowel_count / len(letters)) < 0.2
 
 def has_hidden_messenger_contact(text):
@@ -4010,20 +4011,25 @@ def vk_antispam_worker(
                             fwd_text = extract_fwd_text(vk_token, message_id)
                             if fwd_text:
                                 effective_text = fwd_text
-                                add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю на спам")
+                                add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю")
 
-                        if from_id > 0 and effective_text:
-                            # Админы могут писать всё что угодно - пропускаем проверку
-                            if not is_admin(from_id):
+                        if from_id > 0 and effective_text and not is_admin(from_id):
+                            # ШАГ 1: СНАЧАЛА проверяем на заказ — клиентов никогда не кикаем!
+                            is_order_msg = False
+                            if order_notify_enabled and order_notify_user_id:
+                                is_order_msg, matched_keyword = check_order_keywords(effective_text)
+                                if is_order_msg:
+                                    add_log(f"🛒 [ORDER] Заказ от user_id={from_id}, ключевое слово: '{matched_keyword}'")
+                                    add_log(f"   Текст: {effective_text[:100]}")
+                                    send_order_notification_vk(vk_token, order_notify_user_id, from_id, effective_text, peer_id, order_chat_link)
+
+                            # ШАГ 2: Если НЕ заказ — проверяем на спам
+                            if not is_order_msg:
                                 is_spam_detected = False
                                 spam_reason = ""
                                 spam_details = {}
 
-                                # Проверяем паттерны спама
                                 is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(effective_text, ANTIWORDS)
-
-                                # СТРОГАЯ ПОЛИТИКА: ЛЮБОЙ признак спама = кик
-                                # Проверяем критичные признаки по отдельности
 
                                 # 1. Ссылка от не-админа
                                 if pattern_details.get('has_links'):
@@ -4032,62 +4038,58 @@ def vk_antispam_worker(
                                     spam_details = pattern_details
                                     add_log(f"🚫 Ссылка от не-админа! user_id={from_id}")
 
-                                # 1.5. Скрытый контакт мессенджера (tg:, телеграм:, whatsapp и т.п.)
+                                # 2. Скрытый контакт мессенджера
                                 elif pattern_details.get('has_messenger_contact'):
                                     is_spam_detected = True
                                     spam_reason = "контакт мессенджера / рекламный спам"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Контакт мессенджера! user_id={from_id}")
 
-                                # 2. Номер телефона
+                                # 3. Номер телефона
                                 elif pattern_details.get('has_phone'):
                                     is_spam_detected = True
                                     spam_reason = "номер телефона в сообщении"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Телефон в сообщении! user_id={from_id}")
 
-                                # 3. CAPS LOCK (>70% заглавных букв)
+                                # 4. CAPS LOCK (>70% заглавных букв)
                                 elif pattern_details.get('is_caps'):
                                     is_spam_detected = True
                                     spam_reason = "CAPS LOCK (>70% заглавных)"
                                     spam_details = pattern_details
                                     add_log(f"🚫 CAPS сообщение! user_id={from_id}")
 
-                                # 4. Много эмодзи (>3)
+                                # 5. Много эмодзи (>3)
                                 elif pattern_details.get('emoji_count', 0) > 3:
                                     is_spam_detected = True
                                     spam_reason = f"много эмодзи ({pattern_details['emoji_count']})"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Спам эмодзи! user_id={from_id}")
 
-                                # 5. Бессмысленный набор символов (gibberish)
+                                # 6. Бессмысленный набор символов (gibberish)
                                 elif pattern_details.get('is_gibberish'):
                                     is_spam_detected = True
                                     spam_reason = "бессмысленный набор символов"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Gibberish! user_id={from_id}")
 
-                                # 6. Запрещенные слова из ANTIWORDS
+                                # 7. Запрещенные слова из ANTIWORDS
                                 elif pattern_details.get('has_antiwords'):
                                     is_spam_detected = True
                                     spam_reason = "запрещенные слова"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Запрещенные слова! user_id={from_id}")
 
-                                # Если спам обнаружен - удаляем и кикаем
                                 if is_spam_detected:
                                     add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
                                     add_log(f"   Причина: {spam_reason}")
                                     add_log(f"   Текст: {effective_text[:80]}...")
 
-                                    # Логируем в файл
                                     log_spam_to_file(from_id, effective_text, spam_reason, spam_details)
 
-                                    # Отправляем уведомление в Telegram (если включено)
                                     if notify_telegram and tg_token and tg_chat_id:
                                         send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, effective_text)
 
-                                    # Удаляем сообщение
                                     try:
                                         delete_resp = vk_api_call(
                                             "messages.delete",
@@ -4104,7 +4106,6 @@ def vk_antispam_worker(
                                     except Exception as e:
                                         add_log(f"❌ Ошибка удаления сообщения: {e}")
 
-                                    # Кикаем пользователя
                                     vk_kick_user(
                                         vk_token,
                                         vk_chat_id,
@@ -4112,15 +4113,7 @@ def vk_antispam_worker(
                                         reason=spam_reason
                                     )
 
-                                    # Удаляем из отслеживания (чтобы не кикать повторно)
                                     join_ts.pop(from_id, None)
-                                else:
-                                    # === ПРОВЕРКА ЗАКАЗОВ (только если НЕ спам) ===
-                                    if order_notify_enabled and order_notify_user_id:
-                                        is_order, matched_keyword = check_order_keywords(text)
-                                        if is_order:
-                                            add_log(f"[ORDER] Detected from user_id={from_id}, keyword='{matched_keyword}', text: {text[:100]}...")
-                                            send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id, order_chat_link)
 
                     # Тип события 5 = редактирование сообщения
                     elif update[0] == 5:
