@@ -70,6 +70,8 @@ FG_BTN_START = "#206230"
 BG_BTN_STOP = "#fadada"
 FG_BTN_STOP = "#a03131"
 
+ORDER_FOOTER = "\n\n✅Для заказа сделайте скрин или перешлите пост админу чата: https://vk.com/irina_mod"
+
 ANTIWORDS = [
     "стиральный порошок", "стиральные порошки", "порошок", "порошки",
     "мыло", "жидкое мыло", "шампунь", "шампуни", "одеяла", "одеяло", "подушка", "подушки", "падушки", "падушка",
@@ -4491,7 +4493,8 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                     vk_sent = False
                     tg_sent = False
                     if processed_text.strip() or vk_attachments:
-                        vk_sent = send_vk_message(vk_token, vk_peer_id, processed_text, vk_attachments)
+                        vk_text_with_footer = processed_text + ORDER_FOOTER
+                        vk_sent = send_vk_message(vk_token, vk_peer_id, vk_text_with_footer, vk_attachments)
                         if vk_sent:
                             add_log("✅ Пост успешно отправлен в VK.")
                         else:
