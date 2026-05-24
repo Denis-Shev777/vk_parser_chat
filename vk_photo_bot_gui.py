@@ -70,6 +70,8 @@ FG_BTN_START = "#206230"
 BG_BTN_STOP = "#fadada"
 FG_BTN_STOP = "#a03131"
 
+ORDER_FOOTER = "\n\n✅Для заказа сделайте скрин или перешлите пост админу чата: https://vk.com/irina_mod"
+
 ANTIWORDS = [
     "стиральный порошок", "стиральные порошки", "порошок", "порошки",
     "мыло", "жидкое мыло", "шампунь", "шампуни", "одеяла", "одеяло", "подушка", "подушки", "падушки", "падушка",
@@ -597,16 +599,17 @@ def is_gibberish(text):
     """Проверяет на бессмысленный набор символов"""
     if not text or len(text) < 5:
         return False
-    # Удаляем пробелы и проверяем
+    # Сообщения с ценой/количеством ("122р 2шт", "38р уп", "50р/пар") — не gibberish
+    if re.search(r'\d+\s*(?:р(?:уб)?\.?|₽|шт\.?|уп\.?|пар\.?|кг\.?|гр\.?|мл\.?|л\.?)', text, re.IGNORECASE):
+        return False
     text_clean = text.replace(' ', '').lower()
-    # Если нет гласных в русском или английском - подозрительно
     vowels_ru = set('аеёиоуыэюя')
     vowels_en = set('aeiouy')
     letters = [c for c in text_clean if c.isalpha()]
-    if len(letters) < 3:
+    # Нужно минимум 6 букв для надёжного анализа
+    if len(letters) < 6:
         return False
     vowel_count = sum(1 for c in letters if c in vowels_ru or c in vowels_en)
-    # Если меньше 20% гласных - возможно gibberish
     return (vowel_count / len(letters)) < 0.2
 
 def has_hidden_messenger_contact(text):
@@ -3743,7 +3746,8 @@ def vk_antispam_worker(
     notify_telegram: bool = True,
     order_notify_enabled: bool = False,
     order_notify_user_id: int = None,
-    order_chat_link: str = ""
+    order_chat_link: str = "",
+    order_notify_vk_id_raw: str = ""
 ):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с Long Poll - видит ВСЕ события в реальном времени!
@@ -3796,6 +3800,16 @@ def vk_antispam_worker(
     add_log(f"🔑 Загрузка whitelist администраторов...")
     admin_ids = resolve_admin_ids(vk_token)
     add_log(f"✅ Админов в whitelist: {len(admin_ids)}")
+
+    # Если order_notify_user_id не был разрешён в bot_worker — пробуем из кэша
+    if order_notify_enabled and order_notify_user_id is None and order_notify_vk_id_raw:
+        cached_id = _admin_id_cache.get(order_notify_vk_id_raw)
+        if cached_id:
+            order_notify_user_id = cached_id
+            add_log(f"[ORDER] ID разрешён из кэша: '{order_notify_vk_id_raw}' -> {order_notify_user_id}")
+        else:
+            add_log(f"[ORDER WARNING] Не удалось разрешить '{order_notify_vk_id_raw}' — уведомления о заказах отключены")
+            order_notify_enabled = False
 
     add_log(f"👂 Антиспам: слушаю чат {vk_peer_id}, окно {window_sec} сек")
     
@@ -4002,26 +4016,44 @@ def vk_antispam_worker(
                                         # Нормальный профиль — скорее всего покупатель, пропускаем
 
                         # === ПРОВЕРКА СООБЩЕНИЙ ===
-                        # Для новых пользователей также проверяем текст пересланных сообщений
+                        # Извлекаем текст пересланных сообщений для ВСЕХ пользователей (не только новых)
                         effective_text = text
-                        if from_id > 0 and not text and from_id in join_ts and not is_admin(from_id):
+                        if from_id > 0 and not text and not is_admin(from_id):
                             fwd_text = extract_fwd_text(vk_token, message_id)
                             if fwd_text:
                                 effective_text = fwd_text
-                                add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю на спам")
+                                add_log(f"📨 Пересланное сообщение от user_id={from_id}: проверяю")
 
-                        if from_id > 0 and effective_text:
-                            # Админы могут писать всё что угодно - пропускаем проверку
-                            if not is_admin(from_id):
+                        if from_id > 0 and not is_admin(from_id):
+                            # ШАГ 1: СНАЧАЛА проверяем на заказ — клиентов никогда не кикаем!
+                            is_order_msg = False
+                            if order_notify_enabled and order_notify_user_id:
+                                # 1а: ключевые слова в тексте самого пользователя
+                                if text:
+                                    is_order_msg, matched_keyword = check_order_keywords(text)
+                                    if is_order_msg:
+                                        add_log(f"🛒 [ORDER] Заказ (текст) от user_id={from_id}, слово: '{matched_keyword}'")
+                                        add_log(f"   Текст: {text[:100]}")
+                                        send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id, order_chat_link)
+                                # 1б: переслал пост без текста = почти всегда заказ
+                                if not is_order_msg and not text:
+                                    has_wall_repost_order = any(
+                                        extra.get(k) == "wall"
+                                        for k in extra.keys()
+                                        if k.startswith("attach") and k.endswith("_type")
+                                    )
+                                    if has_wall_repost_order:
+                                        is_order_msg = True
+                                        add_log(f"🛒 [ORDER] Пост переслан от user_id={from_id} без текста — уведомляю")
+                                        send_order_notification_vk(vk_token, order_notify_user_id, from_id, "[Пользователь переслал пост товара без комментария]", peer_id, order_chat_link)
+
+                            # ШАГ 2: Если НЕ заказ — проверяем на спам (только если есть текст)
+                            if not is_order_msg and effective_text:
                                 is_spam_detected = False
                                 spam_reason = ""
                                 spam_details = {}
 
-                                # Проверяем паттерны спама
                                 is_spam_pattern, pattern_reason, pattern_details = check_spam_patterns(effective_text, ANTIWORDS)
-
-                                # СТРОГАЯ ПОЛИТИКА: ЛЮБОЙ признак спама = кик
-                                # Проверяем критичные признаки по отдельности
 
                                 # 1. Ссылка от не-админа
                                 if pattern_details.get('has_links'):
@@ -4030,62 +4062,58 @@ def vk_antispam_worker(
                                     spam_details = pattern_details
                                     add_log(f"🚫 Ссылка от не-админа! user_id={from_id}")
 
-                                # 1.5. Скрытый контакт мессенджера (tg:, телеграм:, whatsapp и т.п.)
+                                # 2. Скрытый контакт мессенджера
                                 elif pattern_details.get('has_messenger_contact'):
                                     is_spam_detected = True
                                     spam_reason = "контакт мессенджера / рекламный спам"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Контакт мессенджера! user_id={from_id}")
 
-                                # 2. Номер телефона
+                                # 3. Номер телефона
                                 elif pattern_details.get('has_phone'):
                                     is_spam_detected = True
                                     spam_reason = "номер телефона в сообщении"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Телефон в сообщении! user_id={from_id}")
 
-                                # 3. CAPS LOCK (>70% заглавных букв)
+                                # 4. CAPS LOCK (>70% заглавных букв)
                                 elif pattern_details.get('is_caps'):
                                     is_spam_detected = True
                                     spam_reason = "CAPS LOCK (>70% заглавных)"
                                     spam_details = pattern_details
                                     add_log(f"🚫 CAPS сообщение! user_id={from_id}")
 
-                                # 4. Много эмодзи (>3)
+                                # 5. Много эмодзи (>3)
                                 elif pattern_details.get('emoji_count', 0) > 3:
                                     is_spam_detected = True
                                     spam_reason = f"много эмодзи ({pattern_details['emoji_count']})"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Спам эмодзи! user_id={from_id}")
 
-                                # 5. Бессмысленный набор символов (gibberish)
+                                # 6. Бессмысленный набор символов (gibberish)
                                 elif pattern_details.get('is_gibberish'):
                                     is_spam_detected = True
                                     spam_reason = "бессмысленный набор символов"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Gibberish! user_id={from_id}")
 
-                                # 6. Запрещенные слова из ANTIWORDS
+                                # 7. Запрещенные слова из ANTIWORDS
                                 elif pattern_details.get('has_antiwords'):
                                     is_spam_detected = True
                                     spam_reason = "запрещенные слова"
                                     spam_details = pattern_details
                                     add_log(f"🚫 Запрещенные слова! user_id={from_id}")
 
-                                # Если спам обнаружен - удаляем и кикаем
                                 if is_spam_detected:
                                     add_log(f"⚠️ СПАМ ОБНАРУЖЕН! user_id={from_id}")
                                     add_log(f"   Причина: {spam_reason}")
                                     add_log(f"   Текст: {effective_text[:80]}...")
 
-                                    # Логируем в файл
                                     log_spam_to_file(from_id, effective_text, spam_reason, spam_details)
 
-                                    # Отправляем уведомление в Telegram (если включено)
                                     if notify_telegram and tg_token and tg_chat_id:
                                         send_spam_alert_telegram(tg_token, tg_chat_id, from_id, spam_reason, effective_text)
 
-                                    # Удаляем сообщение
                                     try:
                                         delete_resp = vk_api_call(
                                             "messages.delete",
@@ -4102,7 +4130,6 @@ def vk_antispam_worker(
                                     except Exception as e:
                                         add_log(f"❌ Ошибка удаления сообщения: {e}")
 
-                                    # Кикаем пользователя
                                     vk_kick_user(
                                         vk_token,
                                         vk_chat_id,
@@ -4110,15 +4137,7 @@ def vk_antispam_worker(
                                         reason=spam_reason
                                     )
 
-                                    # Удаляем из отслеживания (чтобы не кикать повторно)
                                     join_ts.pop(from_id, None)
-                                else:
-                                    # === ПРОВЕРКА ЗАКАЗОВ (только если НЕ спам) ===
-                                    if order_notify_enabled and order_notify_user_id:
-                                        is_order, matched_keyword = check_order_keywords(text)
-                                        if is_order:
-                                            add_log(f"[ORDER] Detected from user_id={from_id}, keyword='{matched_keyword}', text: {text[:100]}...")
-                                            send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id, order_chat_link)
 
                     # Тип события 5 = редактирование сообщения
                     elif update[0] == 5:
@@ -4315,8 +4334,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         if order_notify_user_id:
             add_log(f"[ORDER] Order notifications enabled -> user_id={order_notify_user_id}")
         else:
-            add_log(f"[ORDER WARNING] Cannot resolve VK ID '{order_notify_vk_id_raw}', order notifications disabled")
-            order_notify_enabled = False
+            add_log(f"[ORDER WARNING] Cannot resolve '{order_notify_vk_id_raw}' now — will retry in antispam thread")
 
     if antispam_enabled:
         # Проверяем настройку уведомлений в Telegram
@@ -4325,19 +4343,19 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
         threading.Thread(
             target=vk_antispam_worker,
             args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, antispam_window_sec, 1, tg_token, tg_chat_id, notify_telegram,
-                  order_notify_enabled, order_notify_user_id, order_chat_link),
+                  order_notify_enabled, order_notify_user_id, order_chat_link, order_notify_vk_id_raw),
             daemon=True
         ).start()
         notify_status = "с уведомлениями в Telegram" if (notify_telegram and tg_token and tg_chat_id) else "без уведомлений"
         order_status = ", заказы -> ЛС" if order_notify_enabled else ""
         add_log(f"🛡️ Антиспам VK запущен (окно: {antispam_window_sec} сек, {notify_status}{order_status}).")
-    elif order_notify_enabled and order_notify_user_id:
+    elif order_notify_enabled:
         # Антиспам отключен, но заказы включены — запускаем Long Poll только для заказов
         add_log("[ORDER] Antispam disabled, but order notifications enabled. Starting Long Poll for orders only...")
         threading.Thread(
             target=vk_antispam_worker,
             args=(vk_token, vk_peer_id, vk_chat_id, stop_event_obj, 0, 1, tg_token, tg_chat_id, False,
-                  order_notify_enabled, order_notify_user_id, order_chat_link),
+                  order_notify_enabled, order_notify_user_id, order_chat_link, order_notify_vk_id_raw),
             daemon=True
         ).start()
     else:
@@ -4491,7 +4509,8 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                     vk_sent = False
                     tg_sent = False
                     if processed_text.strip() or vk_attachments:
-                        vk_sent = send_vk_message(vk_token, vk_peer_id, processed_text, vk_attachments)
+                        vk_text_with_footer = processed_text + ORDER_FOOTER
+                        vk_sent = send_vk_message(vk_token, vk_peer_id, vk_text_with_footer, vk_attachments)
                         if vk_sent:
                             add_log("✅ Пост успешно отправлен в VK.")
                         else:
