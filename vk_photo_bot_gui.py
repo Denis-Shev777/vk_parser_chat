@@ -3846,7 +3846,11 @@ def vk_antispam_worker(
                         text = update[5]
                         extra = update[6] if len(update) > 6 else {}
                         message_id = update[1]
-                        
+
+                        # Пропускаем исходящие сообщения (бит 2 = OUTBOX = отправлено нашим аккаунтом)
+                        if flags & 2:
+                            continue
+
                         # Только наш чат
                         if peer_id != vk_peer_id:
                             continue
