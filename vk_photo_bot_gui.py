@@ -418,7 +418,9 @@ def send_order_notification_vk(vk_token, admin_user_id, from_id, message_text, p
         )
         if chat_link:
             notification += f"\n\nПерейти в чат: {chat_link}"
-        send_vk_message(vk_token, admin_user_id, notification)
+        if not send_vk_message(vk_token, admin_user_id, notification):
+            add_log(f"[ORDER ERROR] VK rejected notification (admin_user_id={admin_user_id})")
+            return False
         add_log(f"[ORDER] Notification sent to admin (user_id={admin_user_id})")
         return True
     except Exception as e:
@@ -4032,13 +4034,23 @@ def vk_antispam_worker(
                             # ШАГ 1: СНАЧАЛА проверяем на заказ — клиентов никогда не кикаем!
                             is_order_msg = False
                             if order_notify_enabled and order_notify_user_id:
-                                # 1а: ключевые слова в тексте самого пользователя
+                                # Если собственный текст не похож на заказ, проверяем пересланную часть.
+                                # Покупатели часто пересылают товар и добавляют только размер или количество.
                                 if text:
-                                    is_order_msg, matched_keyword = check_order_keywords(text)
+                                    direct_is_order, _ = check_order_keywords(text)
+                                    if not direct_is_order:
+                                        fwd_text = extract_fwd_text(vk_token, message_id)
+                                        if fwd_text:
+                                            effective_text = f"{text}\n{fwd_text}".strip()
+
+                                # 1а: ключевые слова во всём доступном тексте, включая пересланное сообщение
+                                order_text = effective_text or text
+                                if order_text:
+                                    is_order_msg, matched_keyword = check_order_keywords(order_text)
                                     if is_order_msg:
                                         add_log(f"🛒 [ORDER] Заказ (текст) от user_id={from_id}, слово: '{matched_keyword}'")
-                                        add_log(f"   Текст: {text[:100]}")
-                                        send_order_notification_vk(vk_token, order_notify_user_id, from_id, text, peer_id, order_chat_link)
+                                        add_log(f"   Текст: {order_text[:100]}")
+                                        send_order_notification_vk(vk_token, order_notify_user_id, from_id, order_text, peer_id, order_chat_link)
                                 # 1б: переслал пост без текста = почти всегда заказ
                                 if not is_order_msg and not text:
                                     has_wall_repost_order = any(
