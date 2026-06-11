@@ -60,6 +60,7 @@ DEFAULT_SETTINGS = {
 MY_USER_ID = "DenisTest"
 CSV_URL = "https://docs.google.com/spreadsheets/d/12BcHBsDRjqR60T8ClR5VXugdMPOXhEpPPTov5-bIAmY/export?format=csv&gid=0"
 VK_API_VERSION = "5.131"
+PARSER_BUILD = "2026-06-11-photo-delivery-v3"
 MED_FONT = ("Segoe UI", 14)
 BIG_BOLD_FONT = ("Segoe UI", 22, "bold")
 BG_MAIN = "#f5e9fa"
@@ -4348,6 +4349,7 @@ def send_telegram_message(token, chat_id, text, photo_urls=None):
 
 def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, use_telegram, stop_event_obj, start_btn_ref=None, stop_btn_ref=None):
     add_log("🤖 bot_worker стартовал!")
+    add_log(f"🧩 Версия парсера: {PARSER_BUILD}")
     # --- антиспам для VK беседы (кик, если написал в первые N сек после входа) ---
     antispam_enabled = params.get("antispam_enabled", True)
     antispam_window_sec = params.get("antispam_window_sec", 86400)
@@ -4533,8 +4535,6 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                             if att:
                                 vk_attachments.append(att)
                                 filtered_photo_urls.append(p_url)
-                                save_sent_photo(p_url)
-                                sent_photos.add(p_url)
                             else:
                                 add_log(f"❗ Не удалось загрузить фото '{p_url}' для VK. Оно будет пропущено.")
 
@@ -4558,6 +4558,9 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                         vk_sent = send_vk_message(vk_token, vk_peer_id, vk_text_with_footer, vk_attachments)
                         if vk_sent:
                             add_log("✅ Пост успешно отправлен в VK.")
+                            for p_url in filtered_photo_urls:
+                                save_sent_photo(p_url)
+                                sent_photos.add(p_url)
                         else:
                             add_log("❌ Ошибка отправки поста в VK.")
                     else:
@@ -4573,10 +4576,11 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                             add_log(f"Пост {post_unique_id} не имеет текста или вложений для Telegram после обработки. Пропуск отправки в Telegram.")
                     else:
                         add_log("Telegram не настроен или отключен. Пропуск отправки в Telegram.")
-                    if vk_sent or tg_sent:
+                    all_enabled_destinations_sent = vk_sent and (not use_telegram or tg_sent)
+                    if all_enabled_destinations_sent:
                         sent_ids.add(post_unique_id)
                         save_sent_ids(sent_ids)
-                        add_log(f"✅ Пост {post_unique_id} помечен как отправленный.")
+                        add_log(f"✅ Пост {post_unique_id} доставлен во все включённые площадки и помечен как отправленный.")
                         add_log(f"⏳ Ожидание {freq_sec} секунд перед следующим постом...")
                         for _ in range(freq_sec):
                             if stop_event_obj.is_set():
@@ -4584,7 +4588,7 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                                 return
                             time.sleep(1)
                     else:
-                        add_log(f"Пост {post_unique_id} не был отправлен ни в одну из настроенных платформ. ID не будет сохранен.")
+                        add_log(f"⚠️ Пост {post_unique_id} доставлен не во все включённые площадки. ID не будет сохранён, будет повторная попытка.")
                         add_log(f"⏳ Ожидание {freq_sec // 2} секунд после неуспешной попытки отправки.")
                         for _ in range(freq_sec // 2):
                             if stop_event_obj.is_set():
