@@ -81,12 +81,10 @@ def main():
         logger.error(f"Invalid VK chat ID format: {vk_chat_id}")
         sys.exit(1)
 
-    tg_token = settings.get("tg_token")
-    tg_chat_id = settings.get("tg_chat_id")
-    if isinstance(tg_chat_id, str) and tg_chat_id.lstrip('-').isdigit():
-        tg_chat_id = int(tg_chat_id)
-
-    use_telegram = bool(tg_token and tg_chat_id is not None)
+    # Server mode is VK-only. Ignore stale Telegram credentials in settings.
+    tg_token = None
+    tg_chat_id = None
+    use_telegram = False
 
     # Build params dict (same as GUI does)
     params = {
@@ -106,7 +104,7 @@ def main():
         "hours": settings.get("hours", 24),
         "antispam_enabled": settings.get("antispam_enabled", True),
         "antispam_window_sec": settings.get("antispam_window_sec", 86400),
-        "antispam_notify_telegram": settings.get("antispam_notify_telegram", True),
+        "antispam_notify_telegram": False,
         "order_notify_enabled": settings.get("order_notify_enabled", False),
         "order_notify_vk_id": settings.get("order_notify_vk_id", ""),
         "order_chat_link": settings.get("order_chat_link", ""),
