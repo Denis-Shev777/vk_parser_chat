@@ -3602,7 +3602,8 @@ def upload_photo_to_vk(token, peer_id, photo_url):
         photo_data_resp = requests.get(photo_url, timeout=20)
         photo_data_resp.raise_for_status()
         photo_data = photo_data_resp.content
-        files = {'photo': ('photo.jpg', photo_data, 'image/jpeg')}
+        content_type = photo_data_resp.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
+        files = {'file0': ('photo.jpg', photo_data, content_type)}
         response = requests.post(upload_url, files=files, timeout=20).json()
         if 'error' in response:
             add_log(f"VK API ошибка при загрузке фото на сервер: {response['error'].get('error_msg', 'Неизвестная ошибка')}")
