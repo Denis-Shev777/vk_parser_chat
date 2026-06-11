@@ -3553,17 +3553,45 @@ def parse_attachments(post, limit_photos=0):
             add_log(f"Ограничено количество фото с {original_photo_count} до {limit_photos}.")
     return photos
 
-def upload_photo_to_vk(token, peer_id, photo_url):
-    try:
-        upload_url_resp = requests.get(
+_messages_upload_uses_peer_id = None
+
+
+def get_messages_upload_server(token, peer_id):
+    global _messages_upload_uses_peer_id
+
+    params = {
+        "access_token": token,
+        "v": VK_API_VERSION
+    }
+    if _messages_upload_uses_peer_id is not False:
+        params["peer_id"] = peer_id
+
+    response = requests.get(
+        "https://api.vk.com/method/photos.getMessagesUploadServer",
+        params=params,
+        timeout=10
+    ).json()
+
+    error = response.get("error", {})
+    error_msg = error.get("error_msg", "")
+    if error.get("error_code") == 100 and "only group can use peer_id parameter" in error_msg.lower():
+        add_log("VK использует пользовательский токен: повтор получения сервера загрузки без peer_id.")
+        _messages_upload_uses_peer_id = False
+        params.pop("peer_id")
+        response = requests.get(
             "https://api.vk.com/method/photos.getMessagesUploadServer",
-            params={
-                "access_token": token,
-                "peer_id": peer_id,
-                "v": VK_API_VERSION
-            },
+            params=params,
             timeout=10
         ).json()
+    elif "response" in response and "peer_id" in params:
+        _messages_upload_uses_peer_id = True
+
+    return response
+
+
+def upload_photo_to_vk(token, peer_id, photo_url):
+    try:
+        upload_url_resp = get_messages_upload_server(token, peer_id)
         if 'error' in upload_url_resp:
             add_log(f"VK API ошибка (getMessagesUploadServer): {upload_url_resp['error'].get('error_msg', 'Неизвестная ошибка')}")
             return None
