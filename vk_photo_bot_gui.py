@@ -60,7 +60,7 @@ DEFAULT_SETTINGS = {
 MY_USER_ID = "DenisTest"
 CSV_URL = "https://docs.google.com/spreadsheets/d/12BcHBsDRjqR60T8ClR5VXugdMPOXhEpPPTov5-bIAmY/export?format=csv&gid=0"
 VK_API_VERSION = "5.131"
-PARSER_BUILD = "2026-06-11-photo-delivery-v3"
+PARSER_BUILD = "2026-06-11-photo-delivery-v4"
 MED_FONT = ("Segoe UI", 14)
 BIG_BOLD_FONT = ("Segoe UI", 22, "bold")
 BG_MAIN = "#f5e9fa"
@@ -3554,6 +3554,26 @@ def parse_attachments(post, limit_photos=0):
             add_log(f"Ограничено количество фото с {original_photo_count} до {limit_photos}.")
     return photos
 
+
+def parse_vk_photo_attachments(post, limit_photos=0):
+    attachments = []
+    for item in post.get('attachments', []):
+        if item.get('type') != 'photo':
+            continue
+        photo = item.get('photo', {})
+        owner_id = photo.get('owner_id')
+        photo_id = photo.get('id')
+        if owner_id is None or photo_id is None:
+            attachments.append(None)
+            continue
+        attachment = f"photo{owner_id}_{photo_id}"
+        if photo.get('access_key'):
+            attachment += f"_{photo['access_key']}"
+        attachments.append(attachment)
+    if limit_photos and limit_photos > 0:
+        attachments = attachments[:limit_photos]
+    return attachments
+
 _messages_upload_uses_peer_id = None
 
 
@@ -4521,17 +4541,22 @@ def bot_worker(params, vk_token, vk_peer_id, vk_chat_id, tg_token, tg_chat_id, u
                         add_log(f"Пропущен пост {post_unique_id}: нет текста и нет вложений. Пропуск.")
                         continue
                     photo_urls = parse_attachments(post, limit_photos)
+                    source_vk_attachments = parse_vk_photo_attachments(post, limit_photos)
                     vk_attachments = []
                     filtered_photo_urls = []
 
                     if photo_urls:
-                        add_log(f"Найдено {len(photo_urls)} URL фото для загрузки в VK (до фильтра повторов).")
-                        for p_url in photo_urls:
+                        add_log(f"Найдено {len(photo_urls)} фото для отправки в VK (до фильтра повторов).")
+                        for photo_index, p_url in enumerate(photo_urls):
                             if p_url in sent_photos:
                                 add_log(f"⚠️ Фото уже отправлялось ранее, пропуск: {p_url}")
                                 continue
-                            add_log(f"Попытка загрузки фото '{p_url}' для VK...")
-                            att = upload_photo_to_vk(vk_token, vk_peer_id, p_url)
+                            att = source_vk_attachments[photo_index] if photo_index < len(source_vk_attachments) else None
+                            if att:
+                                add_log(f"Используем исходное вложение VK: {att}")
+                            else:
+                                add_log(f"У исходного фото нет VK ID, пробуем загрузку по URL: {p_url}")
+                                att = upload_photo_to_vk(vk_token, vk_peer_id, p_url)
                             if att:
                                 vk_attachments.append(att)
                                 filtered_photo_urls.append(p_url)
